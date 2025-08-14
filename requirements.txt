@@ -1,0 +1,14 @@
+paramiko
+cryptography
+bcrypt
+customtkinter
+Pillow
+pytest
+black
+pylint
+customtkinter
+Pillow
+python-dotenv
+pyyaml
+cloudflare
+colorlog
