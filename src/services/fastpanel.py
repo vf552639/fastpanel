@@ -29,8 +29,8 @@ class FastPanelService:
     def __init__(self, ssh_manager: SSHManager = None):
         self.ssh = ssh_manager or SSHManager()
 
-    def _get_os_type(self) -> Optional[str]:
-        """Определяет тип ОС на сервере."""
+    def _get_os_info(self) -> Optional[Dict[str, str]]:
+        """Определяет ОС, ее имя, семейство и версию."""
         if not self.ssh.connected:
             return None
         
@@ -39,54 +39,73 @@ class FastPanelService:
             return None
             
         os_info = dict(line.split('=', 1) for line in result.stdout.split('\n') if '=' in line)
-        os_name = os_info.get('NAME', '').strip('"').lower()
+        os_name = os_info.get('NAME', '').strip('"')
+        os_id = os_info.get('ID', '').strip('"').lower()
+        os_version = os_info.get('VERSION_ID', '').strip('"')
 
-        if "ubuntu" in os_name or "debian" in os_name:
-            return "debian"
-        if "centos" in os_name or "almalinux" in os_name or "rocky" in os_name:
-            return "centos"
-            
+        family = None
+        if "ubuntu" in os_id or "debian" in os_id:
+            family = "debian"
+        elif "centos" in os_id or "almalinux" in os_id or "rocky" in os_id:
+            family = "centos"
+        
+        if family:
+            return {"name": os_name, "family": family, "version": os_version}
+        
         return None
 
     def install(self, host: str, username: str, password: str, callback: Optional[Callable] = None) -> Dict[str, Any]:
         """
-        Установка FastPanel на сервер с детальным логгированием и определением ОС.
+        Установка FastPanel с предварительной проверкой совместимости ОС.
         """
         result = {'success': False, 'admin_url': None, 'admin_password': "Not found", 'error': None}
 
         def update_progress(message: str, progress: float):
             if callback:
-                # Эта функция теперь безопасна и вызывает только callback
                 callback(message, progress)
 
         try:
-            update_progress("Подключение...", 0.1)
+            update_progress(f"Подключение к {host}...", 0.05)
             if not self.ssh.connect(host, username, password):
-                result['error'] = "Не удалось подключиться по SSH"
+                result['error'] = "Не удалось подключиться по SSH. Проверьте IP, логин и пароль."
                 update_progress(f"❌ Ошибка: {result['error']}", 0)
                 return result
             
-            update_progress("Определение ОС...", 0.2)
-            os_type = self._get_os_type()
-            if not os_type:
-                result['error'] = "Не удалось определить ОС"
+            update_progress("✅ Авторизация на сервере прошла успешно!", 0.1)
+            
+            update_progress("Определение операционной системы...", 0.15)
+            os_data = self._get_os_info()
+            if not os_data:
+                result['error'] = "Не удалось определить ОС или ОС не поддерживается."
                 update_progress(f"❌ Ошибка: {result['error']}", 0)
                 return result
-            update_progress(f"ОС определена: {os_type.capitalize()}", 0.3)
+            
+            os_name, os_family, os_version = os_data['name'], os_data['family'], os_data['version']
+            update_progress(f"ОС определена: {os_name} {os_version}", 0.2)
+
+            # --- ПРОВЕРКА СОВМЕСТИМОСТИ ---
+            supported_versions = ["20.04", "22.04"]
+            if os_family == "debian" and not any(v in os_version for v in supported_versions):
+                result['error'] = f"Версия {os_name} {os_version} не поддерживается установщиком FastPanel."
+                update_progress(f"❌ Ошибка: {result['error']}", 0)
+                update_progress("Используйте Ubuntu 20.04 или 22.04.", 0)
+                return result
 
             prep_commands = {
                 "debian": "apt-get update -qq && apt-get install -y ca-certificates wget",
-                "centos": "yum makecache && yum install -y ca-certificates wget"
+                "centos": "yum makecache -y && yum install -y ca-certificates wget"
             }
             
-            update_progress("Установка системных пакетов...", 0.4)
-            prep_command = prep_commands.get(os_type)
+            update_progress("Подготовка системы и установка пакетов...", 0.3)
+            prep_command = prep_commands.get(os_family)
             prep_result = self.ssh.execute(prep_command, timeout=300)
             if not prep_result.success:
-                # Это некритичная ошибка, просто логируем
-                logger.warning(f"Не удалось выполнить команду подготовки: {prep_result.stderr}")
-            
-            update_progress("Запуск установщика FASTPANEL...", 0.6)
+                logger.warning(f"Команда подготовки системы завершилась с ошибкой: {prep_result.stderr}")
+                update_progress("⚠️ Предупреждение: не удалось выполнить команды подготовки.", 0.4)
+            else:
+                update_progress("Система подготовлена.", 0.4)
+
+            update_progress("Запуск установщика FASTPANEL (это может занять несколько минут)...", 0.5)
             install_cmd = "wget https://repo.fastpanel.direct/install_fastpanel.sh -O - | bash -"
             
             output_log = []
@@ -94,46 +113,38 @@ class FastPanelService:
 
             def parse_output(line: str):
                 nonlocal admin_url, admin_password
-                output_log.append(line)
-                update_progress(line, 0.6) # Держим прогресс на 60% во время установки
-                
-                # Поиск URL
-                if "https://" in line and ":8888" in line:
-                    url_match = re.search(r'(https?://\S+:8888)', line)
-                    if url_match:
-                        admin_url = url_match.group(1)
-                elif "ttp://" in line and ":8888" in line: # Исправление опечатки
-                    url_match = re.search(r'(ttps?://\S+:8888)', line.replace("ttp", "http"))
-                    if url_match:
-                        # Корректируем URL, подставляя IP сервера
-                        admin_url = url_match.group(1).replace(f"//{host}", f"//{host}")
-                
-                # Поиск пароля
-                pass_match = re.search(r'(?:admin password|пароль администратора):\s*(\S+)', line, re.IGNORECASE)
-                if pass_match:
-                    admin_password = pass_match.group(1)
+                clean_line = line.strip()
+                if not clean_line: return
+                output_log.append(clean_line)
+                update_progress(clean_line, 0.5)
+                if "admin password" in clean_line.lower() or "пароль администратора" in clean_line.lower():
+                    pass_match = re.search(r':\s*(\S+)', clean_line)
+                    if pass_match: admin_password = pass_match.group(1)
+                if "https://" in clean_line and ":8888" in clean_line:
+                    url_match = re.search(r'(https?://\S+:8888)', clean_line)
+                    if url_match: admin_url = url_match.group(1)
 
             install_result = self.ssh.execute_with_progress(install_cmd, parse_output)
 
             update_progress("Получение данных доступа...", 0.9)
-            if not admin_url: # Если URL не был найден в логе
-                admin_url = f"https://{host}:8888"
+            if not admin_url: admin_url = f"https://{host}:8888"
 
-            if install_result.success:
+            if install_result.success and admin_password:
                 result.update({
-                    'success': True,
-                    'admin_url': admin_url,
-                    'admin_password': admin_password,
+                    'success': True, 'admin_url': admin_url, 'admin_password': admin_password,
                     'install_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 })
                 update_progress("✅ Установка успешно завершена!", 1.0)
             else:
-                result['error'] = f"Установка завершилась с ошибкой: \n{''.join(install_result.stderr or output_log)}"
+                error_details = install_result.stderr or "\n".join(output_log[-10:])
+                result['error'] = f"Установка завершилась с ошибкой: {error_details}"
+                if not admin_password:
+                     result['error'] += "\nНе удалось найти пароль администратора в выводе."
                 update_progress(f"❌ {result['error']}", 0)
 
         except Exception as e:
             result['error'] = str(e)
-            logger.error(f"Критическая ошибка при установке: {e}", exc_info=True)
+            logger.error(f"Критическая ошибка: {e}", exc_info=True)
             update_progress(f"❌ Критическая ошибка: {e}", 0)
         finally:
             self.ssh.disconnect()
