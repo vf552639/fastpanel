@@ -180,6 +180,17 @@ class ServerCard(ctk.CTkFrame):
             command=lambda: self._on_delete()
         )
         delete_btn.pack(side="right")
+        
+        # Кнопка редактирования
+        edit_btn = ctk.CTkButton(
+            bottom_frame,
+            text="✏️",
+            width=30,
+            height=28,
+            command=lambda: self._on_edit()
+        )
+        edit_btn.pack(side="right", padx=5)
+
 
         # Добавляем дату создания
         if self.server_data.get("created_at"):
@@ -206,6 +217,10 @@ class ServerCard(ctk.CTkFrame):
     def _on_delete(self):
         if self.on_click:
             self.on_click("delete", self.server_data)
+            
+    def _on_edit(self):
+        if self.on_click:
+            self.on_click("edit", self.server_data)
 
 
 class FastPanelApp(ctk.CTk):
@@ -441,8 +456,11 @@ class FastPanelApp(ctk.CTk):
 
         search_query = self.search_entry.get().lower()
 
+        # Сортировка серверов по дате создания (от новых к старым)
+        sorted_servers = sorted(self.servers, key=lambda s: s.get("created_at", ""), reverse=True)
+        
         filtered_servers = [
-            s for s in self.servers
+            s for s in sorted_servers
             if search_query in s.get("name", "").lower() or search_query in s.get("ip", "").lower()
         ]
 
@@ -496,7 +514,7 @@ class FastPanelApp(ctk.CTk):
             fg_color=("#ffffff", "#2b2b2b"),
             corner_radius=10
         )
-        form_frame.pack(fill="both", expand=True, padx=100, pady=50)
+        form_frame.pack(fill="x", expand=True, padx=100, pady=50)
 
         # Заголовок формы
         ctk.CTkLabel(
@@ -664,7 +682,7 @@ class FastPanelApp(ctk.CTk):
             font=ctk.CTkFont(size=13)
         )
         self.existing_server_name_entry.pack(pady=(0, 15), fill="x", expand=True)
-
+        
         # IP address
         ctk.CTkLabel(
             parent_frame,
@@ -1236,6 +1254,8 @@ class FastPanelApp(ctk.CTk):
                 webbrowser.open(server_data["admin_url"])
         elif action == "delete":
             self.confirm_delete_server(server_data)
+        elif action == "edit":
+            self.show_edit_server_dialog(server_data)
 
     def show_server_management(self, server_data):
         """Показать окно управления сервером"""
@@ -1243,6 +1263,8 @@ class FastPanelApp(ctk.CTk):
         manage_window = ctk.CTkToplevel(self)
         manage_window.title(f"Управление: {server_data['name']}")
         manage_window.geometry("800x600")
+        manage_window.transient(self)
+        manage_window.grab_set()
 
         # Центрируем окно
         manage_window.update_idletasks()
@@ -1393,42 +1415,52 @@ class FastPanelApp(ctk.CTk):
             command=lambda: self.show_add_site_dialog(server_data)
         ).pack(side="left")
 
-        # Список сайтов (пример)
-        sites_list = ctk.CTkScrollableFrame(sites_frame, fg_color="transparent")
-        sites_list.pack(fill="both", expand=True)
+        # Список сайтов
+        sites_list_frame = ctk.CTkScrollableFrame(sites_frame, fg_color="transparent")
+        sites_list_frame.pack(fill="both", expand=True)
 
-        # Пример сайтов
-        example_sites = [
-            {"domain": "example.com", "type": "PHP 8.1", "status": "active"},
-            {"domain": "test.example.com", "type": "Node.js", "status": "active"},
-            {"domain": "blog.example.com", "type": "WordPress", "status": "stopped"}
-        ]
+        server_domains = [d for d in self.domains if d["server_ip"] == server_data["ip"]]
 
-        for site in example_sites:
-            site_card = ctk.CTkFrame(
-                sites_list,
-                fg_color=("#ffffff", "#2b2b2b"),
-                corner_radius=8
-            )
-            site_card.pack(fill="x", pady=5)
+        if not server_domains:
+            ctk.CTkLabel(sites_list_frame, text="На этом сервере нет сайтов").pack(pady=20)
+        else:
+            for domain_info in server_domains:
+                site_card = ctk.CTkFrame(sites_list_frame, fg_color=("#ffffff", "#2b2b2b"), corner_radius=8)
+                site_card.pack(fill="x", pady=5)
 
-            site_content = ctk.CTkFrame(site_card, fg_color="transparent")
-            site_content.pack(padx=15, pady=12)
+                site_content = ctk.CTkFrame(site_card, fg_color="transparent")
+                site_content.pack(padx=15, pady=12, fill="x", expand=True)
 
-            # Информация о сайте
-            ctk.CTkLabel(
-                site_content,
-                text=f"🌐 {site['domain']}",
-                font=ctk.CTkFont(size=14, weight="bold")
-            ).pack(anchor="w")
+                ctk.CTkLabel(site_content, text=f"🌐 {domain_info['domain']}", font=ctk.CTkFont(size=14, weight="bold")).pack(side="left", anchor="w")
 
-            ctk.CTkLabel(
-                site_content,
-                text=f"Тип: {site['type']} | Статус: {'✅' if site['status'] == 'active' else '⏸️'} {site['status']}",
-                font=ctk.CTkFont(size=11),
-                text_color=("#666666", "#aaaaaa")
-            ).pack(anchor="w", pady=(2, 0))
+                delete_btn = ctk.CTkButton(site_content, text="🗑️", width=30, command=lambda d=domain_info: self.delete_domain(d, server_data, sites_list_frame))
+                delete_btn.pack(side="right")
+    
+    def delete_domain(self, domain_to_delete, server_data, sites_list_frame):
+        self.domains = [d for d in self.domains if not (d["domain"] == domain_to_delete["domain"] and d["server_ip"] == domain_to_delete["server_ip"])]
+        self.save_domains()
+        
+        # Refresh the sites list
+        for widget in sites_list_frame.winfo_children():
+            widget.destroy()
 
+        server_domains = [d for d in self.domains if d["server_ip"] == server_data["ip"]]
+
+        if not server_domains:
+            ctk.CTkLabel(sites_list_frame, text="На этом сервере нет сайтов").pack(pady=20)
+        else:
+            for domain_info in server_domains:
+                site_card = ctk.CTkFrame(sites_list_frame, fg_color=("#ffffff", "#2b2b2b"), corner_radius=8)
+                site_card.pack(fill="x", pady=5)
+
+                site_content = ctk.CTkFrame(site_card, fg_color="transparent")
+                site_content.pack(padx=15, pady=12, fill="x", expand=True)
+
+                ctk.CTkLabel(site_content, text=f"🌐 {domain_info['domain']}", font=ctk.CTkFont(size=14, weight="bold")).pack(side="left", anchor="w")
+
+                delete_btn = ctk.CTkButton(site_content, text="🗑️", width=30, command=lambda d=domain_info: self.delete_domain(d, server_data, sites_list_frame))
+                delete_btn.pack(side="right")
+                
     def _create_databases_tab(self, parent, server_data):
         """Создание вкладки управления базами данных"""
         db_frame = ctk.CTkFrame(parent, fg_color="transparent")
@@ -1497,6 +1529,9 @@ class FastPanelApp(ctk.CTk):
         dialog = ctk.CTkToplevel(self)
         dialog.title("Установка FastPanel")
         dialog.geometry("500x400")
+        dialog.transient(self)
+        dialog.grab_set()
+
 
         # Центрируем
         dialog.update_idletasks()
@@ -1578,6 +1613,8 @@ class FastPanelApp(ctk.CTk):
         dialog = ctk.CTkToplevel(self)
         dialog.title("Добавление сайта")
         dialog.geometry("500x450")
+        dialog.transient(self)
+        dialog.grab_set()
 
         # Центрируем
         dialog.update_idletasks()
@@ -1674,6 +1711,8 @@ class FastPanelApp(ctk.CTk):
         dialog = ctk.CTkToplevel(self)
         dialog.title("Подтверждение удаления")
         dialog.geometry("400x200")
+        dialog.transient(self)
+        dialog.grab_set()
 
         # Центрируем
         dialog.update_idletasks()
@@ -1725,6 +1764,8 @@ class FastPanelApp(ctk.CTk):
         dialog = ctk.CTkToplevel(self)
         dialog.title("Пароль администратора")
         dialog.geometry("400x150")
+        dialog.transient(self)
+        dialog.grab_set()
 
         # Центрируем
         dialog.update_idletasks()
@@ -1958,6 +1999,91 @@ class FastPanelApp(ctk.CTk):
             text="● Готов к работе",
             text_color=("#4caf50", "#4caf50")
         ))
+    
+    def show_edit_server_dialog(self, server_data):
+        """Show dialog to edit an existing server."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Редактировать сервер")
+        dialog.geometry("500x500")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        # Center the dialog
+        dialog.update_idletasks()
+        x = (self.winfo_screenwidth() // 2) - 250
+        y = (self.winfo_screenheight() // 2) - 250
+        dialog.geometry(f"500x500+{x}+{y}")
+        
+        scrollable_frame = ctk.CTkScrollableFrame(dialog, fg_color="transparent")
+        scrollable_frame.pack(fill="both", expand=True, padx=20, pady=20)
+
+
+        ctk.CTkLabel(scrollable_frame, text="Редактировать сервер", font=ctk.CTkFont(size=20, weight="bold")).pack(pady=(0, 20))
+
+        # Name
+        ctk.CTkLabel(scrollable_frame, text="Имя сервера:", anchor="w").pack(fill="x")
+        name_entry = ctk.CTkEntry(scrollable_frame, width=400, height=40)
+        name_entry.insert(0, server_data.get("name", ""))
+        name_entry.pack(fill="x", pady=(0, 10), expand=True)
+
+        # IP
+        ctk.CTkLabel(scrollable_frame, text="IP адрес:", anchor="w").pack(fill="x")
+        ip_entry = ctk.CTkEntry(scrollable_frame, width=400, height=40)
+        ip_entry.insert(0, server_data.get("ip", ""))
+        ip_entry.pack(fill="x", pady=(0, 10), expand=True)
+
+        # User
+        ctk.CTkLabel(scrollable_frame, text="Пользователь:", anchor="w").pack(fill="x")
+        user_entry = ctk.CTkEntry(scrollable_frame, width=400, height=40)
+        user_entry.insert(0, server_data.get("ssh_user", ""))
+        user_entry.pack(fill="x", pady=(0, 10), expand=True)
+
+        # Password
+        ctk.CTkLabel(scrollable_frame, text="Пароль:", anchor="w").pack(fill="x")
+        password_entry = ctk.CTkEntry(scrollable_frame, width=400, height=40, show="*")
+        password_entry.insert(0, server_data.get("password", ""))
+        password_entry.pack(fill="x", pady=(0, 10), expand=True)
+
+        # Expiration Date
+        ctk.CTkLabel(scrollable_frame, text="Дата окончания (YYYY-MM-DD):", anchor="w").pack(fill="x")
+        expiration_entry = ctk.CTkEntry(scrollable_frame, width=400, height=40)
+        expiration_entry.insert(0, server_data.get("expiration_date", ""))
+        expiration_entry.pack(fill="x", pady=(0, 20), expand=True)
+
+        # Buttons
+        buttons_frame = ctk.CTkFrame(scrollable_frame, fg_color="transparent")
+        buttons_frame.pack()
+        
+        cancel_button = ctk.CTkButton(buttons_frame, text="Отмена", command=dialog.destroy)
+        cancel_button.pack(side="left", padx=10)
+
+        save_button = ctk.CTkButton(buttons_frame, text="Сохранить", command=lambda: self.update_server(
+            server_data["id"],
+            name_entry.get(),
+            ip_entry.get(),
+            user_entry.get(),
+            password_entry.get(),
+            expiration_entry.get(),
+            dialog
+        ))
+        save_button.pack(side="left", padx=10)
+        
+    def update_server(self, server_id, name, ip, user, password, expiration_date, dialog):
+        """Update server data."""
+        for server in self.servers:
+            if server["id"] == server_id:
+                server["name"] = name
+                server["ip"] = ip
+                server["ssh_user"] = user
+                server["password"] = password
+                server["expiration_date"] = expiration_date
+                break
+        
+        self.save_servers()
+        self.show_success("Сервер обновлен")
+        dialog.destroy()
+        self._update_server_list()
+
 
 
 def main():
