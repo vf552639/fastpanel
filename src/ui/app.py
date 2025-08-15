@@ -7,10 +7,11 @@ import customtkinter as ctk
 from typing import Optional, Dict, List
 import json
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 import threading
 from PIL import Image
 import os
+import sys
 
 # Настройка внешнего вида
 ctk.set_appearance_mode("dark")
@@ -74,6 +75,27 @@ class ServerCard(ctk.CTkFrame):
             anchor="w"
         )
         ip_label.pack(fill="x")
+
+        # Дата окончания
+        if self.server_data.get("expiration_date"):
+            try:
+                exp_date = datetime.strptime(self.server_data["expiration_date"], "%Y-%m-%d")
+                days_left = (exp_date - datetime.now()).days
+
+                color = "white"
+                if days_left <= 3:
+                    color = "red"
+
+                exp_label = ctk.CTkLabel(
+                    info_frame,
+                    text=f"Осталось дней: {days_left}",
+                    font=ctk.CTkFont(size=12),
+                    text_color=color,
+                    anchor="w"
+                )
+                exp_label.pack(fill="x")
+            except (ValueError, TypeError):
+                pass # Игнорировать неверный формат даты
 
         # Статус FastPanel
         status_frame = ctk.CTkFrame(top_frame, fg_color="transparent")
@@ -211,6 +233,11 @@ class FastPanelApp(ctk.CTk):
         # Загрузка данных
         self.load_servers()
         self.load_domains()
+
+        # Установка иконки для macOS
+        if sys.platform == "darwin":
+            if os.path.exists("assets/icon.icns"):
+                self.iconbitmap("assets/icon.icns")
 
     def center_window(self):
         """Центрирование окна на экране"""
@@ -375,6 +402,7 @@ class FastPanelApp(ctk.CTk):
             font=ctk.CTkFont(size=12)
         )
         self.search_entry.pack(side="right", padx=10)
+        self.search_entry.bind("<KeyRelease>", self._update_server_list)
 
     def show_servers_tab(self):
         """Отображение вкладки со списком серверов"""
@@ -399,15 +427,28 @@ class FastPanelApp(ctk.CTk):
         add_server_btn.pack(side="left")
 
         # Скроллируемая область для списка серверов
-        scrollable = ctk.CTkScrollableFrame(
+        self.scrollable_servers = ctk.CTkScrollableFrame(
             self.tab_container,
             fg_color="transparent"
         )
-        scrollable.pack(fill="both", expand=True)
+        self.scrollable_servers.pack(fill="both", expand=True)
 
-        if not self.servers:
+        self._update_server_list()
+
+    def _update_server_list(self, event=None):
+        for widget in self.scrollable_servers.winfo_children():
+            widget.destroy()
+
+        search_query = self.search_entry.get().lower()
+
+        filtered_servers = [
+            s for s in self.servers
+            if search_query in s.get("name", "").lower() or search_query in s.get("ip", "").lower()
+        ]
+
+        if not filtered_servers:
             # Пустое состояние
-            empty_frame = ctk.CTkFrame(scrollable, fg_color="transparent")
+            empty_frame = ctk.CTkFrame(self.scrollable_servers, fg_color="transparent")
             empty_frame.pack(expand=True, pady=50)
 
             ctk.CTkLabel(
@@ -431,9 +472,9 @@ class FastPanelApp(ctk.CTk):
 
         else:
             # Отображаем карточки серверов
-            for server in self.servers:
+            for server in filtered_servers:
                 card = ServerCard(
-                    scrollable,
+                    self.scrollable_servers,
                     server,
                     on_click=self.handle_server_action
                 )
@@ -445,13 +486,17 @@ class FastPanelApp(ctk.CTk):
         self.page_title.configure(text="Добавление нового сервера")
         self.current_tab = "add_server"
 
+        # Scrollable frame for the form
+        scrollable_form = ctk.CTkScrollableFrame(self.tab_container, fg_color="transparent")
+        scrollable_form.pack(fill="both", expand=True)
+
         # Форма добавления
         form_frame = ctk.CTkFrame(
-            self.tab_container,
+            scrollable_form,
             fg_color=("#ffffff", "#2b2b2b"),
             corner_radius=10
         )
-        form_frame.pack(fill="both", padx=100, pady=50)
+        form_frame.pack(fill="both", expand=True, padx=100, pady=50)
 
         # Заголовок формы
         ctk.CTkLabel(
@@ -460,86 +505,40 @@ class FastPanelApp(ctk.CTk):
             font=ctk.CTkFont(size=20, weight="bold")
         ).pack(pady=(30, 20))
 
-        # Поля формы
-        fields_frame = ctk.CTkFrame(form_frame, fg_color="transparent")
-        fields_frame.pack(padx=50, pady=20)
+        # Radio buttons for server type
+        server_type_var = ctk.StringVar(value="new")
 
-        # Название сервера
-        ctk.CTkLabel(
-            fields_frame,
-            text="Название сервера",
-            font=ctk.CTkFont(size=12),
-            anchor="w"
-        ).pack(fill="x", pady=(0, 5))
+        radio_frame = ctk.CTkFrame(form_frame, fg_color="transparent")
+        radio_frame.pack(pady=10)
 
-        self.server_name_entry = ctk.CTkEntry(
-            fields_frame,
-            placeholder_text="Например: Production Server",
-            width=400,
-            height=40,
-            font=ctk.CTkFont(size=13)
-        )
-        self.server_name_entry.pack(pady=(0, 15))
+        new_radio = ctk.CTkRadioButton(radio_frame, text="Новая установка", variable=server_type_var, value="new", command=lambda: self.toggle_server_form(server_type_var.get(), form_frame))
+        new_radio.pack(side="left", padx=10)
 
-        # IP адрес
-        ctk.CTkLabel(
-            fields_frame,
-            text="IP адрес",
-            font=ctk.CTkFont(size=12),
-            anchor="w"
-        ).pack(fill="x", pady=(0, 5))
+        existing_radio = ctk.CTkRadioButton(radio_frame, text="Существующий FastPanel", variable=server_type_var, value="existing", command=lambda: self.toggle_server_form(server_type_var.get(), form_frame))
+        existing_radio.pack(side="left", padx=10)
 
-        self.server_ip_entry = ctk.CTkEntry(
-            fields_frame,
-            placeholder_text="192.168.1.100",
-            width=400,
-            height=40,
-            font=ctk.CTkFont(size=13)
-        )
-        self.server_ip_entry.pack(pady=(0, 15))
+        self.toggle_server_form(server_type_var.get(), form_frame)
 
-        # SSH порт
-        ctk.CTkLabel(
-            fields_frame,
-            text="SSH порт",
-            font=ctk.CTkFont(size=12),
-            anchor="w"
-        ).pack(fill="x", pady=(0, 5))
+    def toggle_server_form(self, server_type, parent_frame):
+        if hasattr(self, "fields_frame"):
+            self.fields_frame.destroy()
 
-        self.server_port_entry = ctk.CTkEntry(
-            fields_frame,
-            placeholder_text="22",
-            width=400,
-            height=40,
-            font=ctk.CTkFont(size=13)
-        )
-        self.server_port_entry.pack(pady=(0, 15))
-        self.server_port_entry.insert(0, "22")
+        self.fields_frame = ctk.CTkFrame(parent_frame, fg_color="transparent")
+        self.fields_frame.pack(padx=50, pady=20, fill="x", expand=True)
 
-        # SSH пользователь
-        ctk.CTkLabel(
-            fields_frame,
-            text="SSH пользователь",
-            font=ctk.CTkFont(size=12),
-            anchor="w"
-        ).pack(fill="x", pady=(0, 5))
+        if server_type == "new":
+            self.create_new_server_form(self.fields_frame)
+        else:
+            self.create_existing_server_form(self.fields_frame)
 
-        self.server_user_entry = ctk.CTkEntry(
-            fields_frame,
-            placeholder_text="root",
-            width=400,
-            height=40,
-            font=ctk.CTkFont(size=13)
-        )
-        self.server_user_entry.pack(pady=(0, 15))
-        self.server_user_entry.insert(0, "root")
+        if hasattr(self, "buttons_frame"):
+            self.buttons_frame.destroy()
 
-        # Кнопки
-        buttons_frame = ctk.CTkFrame(form_frame, fg_color="transparent")
-        buttons_frame.pack(pady=(10, 30))
+        self.buttons_frame = ctk.CTkFrame(parent_frame, fg_color="transparent")
+        self.buttons_frame.pack(pady=(10, 30))
 
         ctk.CTkButton(
-            buttons_frame,
+            self.buttons_frame,
             text="Отмена",
             width=120,
             height=40,
@@ -552,13 +551,172 @@ class FastPanelApp(ctk.CTk):
         ).pack(side="left", padx=5)
 
         ctk.CTkButton(
-            buttons_frame,
+            self.buttons_frame,
             text="Добавить сервер",
             width=150,
             height=40,
             font=ctk.CTkFont(size=13, weight="bold"),
-            command=self.add_server
+            command=lambda: self.add_server(server_type)
         ).pack(side="left", padx=5)
+
+    def create_new_server_form(self, parent_frame):
+        # Название сервера
+        ctk.CTkLabel(
+            parent_frame,
+            text="Название сервера",
+            font=ctk.CTkFont(size=12),
+            anchor="w"
+        ).pack(fill="x", pady=(0, 5))
+
+        self.server_name_entry = ctk.CTkEntry(
+            parent_frame,
+            placeholder_text="Например: Production Server",
+            width=400,
+            height=40,
+            font=ctk.CTkFont(size=13)
+        )
+        self.server_name_entry.pack(pady=(0, 15), fill="x", expand=True)
+
+        # IP адрес
+        ctk.CTkLabel(
+            parent_frame,
+            text="IP адрес",
+            font=ctk.CTkFont(size=12),
+            anchor="w"
+        ).pack(fill="x", pady=(0, 5))
+
+        self.server_ip_entry = ctk.CTkEntry(
+            parent_frame,
+            placeholder_text="192.168.1.100",
+            width=400,
+            height=40,
+            font=ctk.CTkFont(size=13)
+        )
+        self.server_ip_entry.pack(pady=(0, 15), fill="x", expand=True)
+
+        # Root user
+        ctk.CTkLabel(
+            parent_frame,
+            text="Пользователь",
+            font=ctk.CTkFont(size=12),
+            anchor="w"
+        ).pack(fill="x", pady=(0, 5))
+
+        self.server_user_entry = ctk.CTkEntry(
+            parent_frame,
+            placeholder_text="root",
+            width=400,
+            height=40,
+            font=ctk.CTkFont(size=13)
+        )
+        self.server_user_entry.insert(0, "root")
+        self.server_user_entry.pack(pady=(0, 15), fill="x", expand=True)
+
+        # Root password
+        ctk.CTkLabel(
+            parent_frame,
+            text="Пароль",
+            font=ctk.CTkFont(size=12),
+            anchor="w"
+        ).pack(fill="x", pady=(0, 5))
+
+        self.server_password_entry = ctk.CTkEntry(
+            parent_frame,
+            placeholder_text="••••••••",
+            width=400,
+            height=40,
+            font=ctk.CTkFont(size=13),
+            show="*"
+        )
+        self.server_password_entry.pack(pady=(0, 15), fill="x", expand=True)
+
+        # Expiration date
+        ctk.CTkLabel(
+            parent_frame,
+            text="Дата окончания (YYYY-MM-DD)",
+            font=ctk.CTkFont(size=12),
+            anchor="w"
+        ).pack(fill="x", pady=(0, 5))
+
+        self.server_expiration_entry = ctk.CTkEntry(
+            parent_frame,
+            placeholder_text="2025-12-31",
+            width=400,
+            height=40,
+            font=ctk.CTkFont(size=13)
+        )
+        self.server_expiration_entry.pack(pady=(0, 15), fill="x", expand=True)
+
+    def create_existing_server_form(self, parent_frame):
+        # Server Name (optional)
+        ctk.CTkLabel(
+            parent_frame,
+            text="Имя сервера (необязательно)",
+            font=ctk.CTkFont(size=12),
+            anchor="w"
+        ).pack(fill="x", pady=(0, 5))
+
+        self.existing_server_name_entry = ctk.CTkEntry(
+            parent_frame,
+            placeholder_text="Например: My Existing Server",
+            width=400,
+            height=40,
+            font=ctk.CTkFont(size=13)
+        )
+        self.existing_server_name_entry.pack(pady=(0, 15), fill="x", expand=True)
+
+        # IP address
+        ctk.CTkLabel(
+            parent_frame,
+            text="URL панели (https://ip:8888)",
+            font=ctk.CTkFont(size=12),
+            anchor="w"
+        ).pack(fill="x", pady=(0, 5))
+
+        self.server_url_entry = ctk.CTkEntry(
+            parent_frame,
+            placeholder_text="https://192.168.1.100:8888",
+            width=400,
+            height=40,
+            font=ctk.CTkFont(size=13)
+        )
+        self.server_url_entry.pack(pady=(0, 15), fill="x", expand=True)
+
+        # Fastuser
+        ctk.CTkLabel(
+            parent_frame,
+            text="Логин",
+            font=ctk.CTkFont(size=12),
+            anchor="w"
+        ).pack(fill="x", pady=(0, 5))
+
+        self.fastuser_entry = ctk.CTkEntry(
+            parent_frame,
+            width=400,
+            height=40,
+            font=ctk.CTkFont(size=13)
+        )
+        self.fastuser_entry.insert(0, "fastuser")
+        self.fastuser_entry.configure(state="disabled")
+        self.fastuser_entry.pack(pady=(0, 15), fill="x", expand=True)
+
+        # Password
+        ctk.CTkLabel(
+            parent_frame,
+            text="Пароль",
+            font=ctk.CTkFont(size=12),
+            anchor="w"
+        ).pack(fill="x", pady=(0, 5))
+
+        self.fastuser_password_entry = ctk.CTkEntry(
+            parent_frame,
+            placeholder_text="••••••••",
+            width=400,
+            height=40,
+            font=ctk.CTkFont(size=13),
+            show="*"
+        )
+        self.fastuser_password_entry.pack(pady=(0, 15), fill="x", expand=True)
 
     def show_domain_tab(self):
         """Отображение вкладки управления доменами"""
@@ -584,7 +742,7 @@ class FastPanelApp(ctk.CTk):
         if not self.domains:
             ctk.CTkLabel(domain_list_frame, text="Нет добавленных доменов").pack(pady=20)
         else:
-            for domain_info in self.domains:
+            for idx, domain_info in enumerate(self.domains):
                 domain_frame = ctk.CTkFrame(domain_list_frame, fg_color=("#ffffff", "#2b2b2b"), corner_radius=8)
                 domain_frame.pack(fill="x", pady=5, padx=5)
 
@@ -593,6 +751,9 @@ class FastPanelApp(ctk.CTk):
 
                 ip_label = ctk.CTkLabel(domain_frame, text=f" (IP: {domain_info['server_ip']})", text_color=("#666666", "#aaaaaa"))
                 ip_label.pack(side="left", padx=10, pady=10)
+
+                edit_btn = ctk.CTkButton(domain_frame, text="✏️", width=30, command=lambda i=idx: self.show_edit_domain_dialog(i))
+                edit_btn.pack(side="right", padx=10, pady=10)
 
     def show_add_domain_dialog(self):
         dialog = ctk.CTkToplevel(self)
@@ -627,6 +788,44 @@ class FastPanelApp(ctk.CTk):
             dialog
         ))
         save_button.pack(pady=20)
+
+    def show_edit_domain_dialog(self, domain_index):
+        domain_info = self.domains[domain_index]
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Редактировать домен")
+        dialog.geometry("400x300")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ctk.CTkLabel(dialog, text="Редактировать домен", font=ctk.CTkFont(size=20, weight="bold")).pack(pady=20)
+
+        # Domain name
+        ctk.CTkLabel(dialog, text="Домен:").pack()
+        domain_entry = ctk.CTkEntry(dialog, width=300)
+        domain_entry.insert(0, domain_info["domain"])
+        domain_entry.pack(pady=10)
+
+        # Server IP
+        ctk.CTkLabel(dialog, text="Сервер:").pack()
+        server_ips = [s['ip'] for s in self.servers if s.get('ip')]
+        server_var = ctk.StringVar(value=domain_info["server_ip"])
+        server_menu = ctk.CTkOptionMenu(dialog, values=server_ips, variable=server_var)
+        server_menu.pack(pady=10)
+
+        save_button = ctk.CTkButton(dialog, text="Сохранить", command=lambda: self.update_domain(
+            domain_index,
+            domain_entry.get(),
+            server_var.get(),
+            dialog
+        ))
+        save_button.pack(pady=20)
+
+    def update_domain(self, index, new_domain, new_server_ip, dialog):
+        self.domains[index] = {"domain": new_domain, "server_ip": new_server_ip}
+        self.save_domains()
+        self.show_domain_tab()
+        dialog.destroy()
 
     def add_domains(self, server_ip, domains_text, dialog):
         domains = [d.strip() for d in domains_text.split("\n") if d.strip()]
@@ -1562,40 +1761,75 @@ class FastPanelApp(ctk.CTk):
             command=dialog.destroy
         ).pack(pady=(10, 0))
 
-    def add_server(self):
+    def add_server(self, server_type):
         """Добавление нового сервера"""
         import uuid
         from datetime import datetime
 
-        # Получаем данные из полей
-        name = self.server_name_entry.get()
-        ip = self.server_ip_entry.get()
-        port = self.server_port_entry.get() or "22"
-        user = self.server_user_entry.get() or "root"
+        new_server = {}
 
-        if not name or not ip:
-            self.show_error("Заполните обязательные поля")
-            return
+        if server_type == "new":
+            name = self.server_name_entry.get()
+            ip = self.server_ip_entry.get()
+            user = self.server_user_entry.get() or "root"
+            password = self.server_password_entry.get()
+            expiration_date = self.server_expiration_entry.get()
 
-        # Создаем новый сервер
-        new_server = {
-            "id": str(uuid.uuid4())[:8],
-            "name": name,
-            "ip": ip,
-            "ssh_port": int(port),
-            "ssh_user": user,
-            "fastpanel_installed": False,
-            "admin_url": None,
-            "admin_password": None,
-            "created_at": datetime.now().isoformat()
-        }
+            if not name or not ip:
+                self.show_error("Заполните обязательные поля")
+                return
+
+            new_server = {
+                "id": str(uuid.uuid4())[:8],
+                "name": name,
+                "ip": ip,
+                "ssh_port": 22,
+                "ssh_user": user,
+                "password": password,
+                "fastpanel_installed": False,
+                "admin_url": None,
+                "admin_password": None,
+                "created_at": datetime.now().isoformat(),
+                "expiration_date": expiration_date
+            }
+        else: # existing
+            name = self.existing_server_name_entry.get()
+            url = self.server_url_entry.get()
+            password = self.fastuser_password_entry.get()
+
+            if not url or not password:
+                self.show_error("Заполните обязательные поля")
+                return
+
+            try:
+                ip = url.split("https://")[1].split(":")[0]
+            except:
+                self.show_error("Неверный формат URL")
+                return
+            
+            if not name:
+                name = ip
+
+            new_server = {
+                "id": str(uuid.uuid4())[:8],
+                "name": name,
+                "ip": ip,
+                "ssh_port": 22,
+                "ssh_user": "fastuser",
+                "password": password,
+                "fastpanel_installed": True,
+                "admin_url": url,
+                "admin_password": password,
+                "created_at": datetime.now().isoformat(),
+                "expiration_date": None
+            }
 
         # Добавляем в список
         self.servers.append(new_server)
         self.save_servers()
 
         # Показываем уведомление
-        self.show_success(f"Сервер {name} успешно добавлен")
+        self.show_success(f"Сервер {new_server['name']} успешно добавлен")
 
         # Возвращаемся к списку серверов
         self.show_servers_tab()
@@ -1647,7 +1881,7 @@ class FastPanelApp(ctk.CTk):
         try:
             data_file = Path("data/servers.json")
             if data_file.exists():
-                with open(data_file, 'r') as f:
+                with open(data_file, 'r', encoding='utf-8') as f:
                     self.servers = json.load(f)
         except Exception as e:
             print(f"Ошибка загрузки серверов: {e}")
@@ -1659,7 +1893,7 @@ class FastPanelApp(ctk.CTk):
             data_dir = Path("data")
             data_dir.mkdir(exist_ok=True)
 
-            with open(data_dir / "servers.json", 'w') as f:
+            with open(data_dir / "servers.json", 'w', encoding='utf-8') as f:
                 json.dump(self.servers, f, indent=2, ensure_ascii=False)
         except Exception as e:
             print(f"Ошибка сохранения серверов: {e}")
@@ -1669,7 +1903,7 @@ class FastPanelApp(ctk.CTk):
         try:
             data_file = Path("data/domains.json")
             if data_file.exists():
-                with open(data_file, 'r') as f:
+                with open(data_file, 'r', encoding='utf-8') as f:
                     self.domains = json.load(f)
         except Exception as e:
             print(f"Ошибка загрузки доменов: {e}")
@@ -1681,7 +1915,7 @@ class FastPanelApp(ctk.CTk):
             data_dir = Path("data")
             data_dir.mkdir(exist_ok=True)
 
-            with open(data_dir / "domains.json", 'w') as f:
+            with open(data_dir / "domains.json", 'w', encoding='utf-8') as f:
                 json.dump(self.domains, f, indent=2, ensure_ascii=False)
         except Exception as e:
             print(f"Ошибка сохранения доменов: {e}")
