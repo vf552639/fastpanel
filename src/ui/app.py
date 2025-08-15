@@ -113,11 +113,16 @@ class FastPanelApp(ctk.CTk):
 
         self.servers = []
         self.domains = []
+        self.logs = []
         self.current_tab = "servers"
+
+        self.log_action("Приложение запущено")
 
         self._create_widgets()
         self.load_servers()
         self.load_domains()
+        
+        self._update_server_list() # Первоначальное отображение серверов
 
         if sys.platform == "darwin" and os.path.exists("assets/icon.icns"):
             self.iconbitmap("assets/icon.icns")
@@ -173,7 +178,7 @@ class FastPanelApp(ctk.CTk):
 
         info_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         info_frame.pack(side="bottom", fill="x", padx=20, pady=20)
-        ctk.CTkLabel(info_frame, text="Version 0.2.1", font=ctk.CTkFont(size=10), text_color=("#999999", "#666666")).pack()
+        ctk.CTkLabel(info_frame, text="Version 0.2.2", font=ctk.CTkFont(size=10), text_color=("#999999", "#666666")).pack()
         self.status_label = ctk.CTkLabel(info_frame, text="● Готов к работе", font=ctk.CTkFont(size=11), text_color=("#4caf50", "#4caf50"))
         self.status_label.pack(pady=(5, 0))
 
@@ -206,6 +211,7 @@ class FastPanelApp(ctk.CTk):
         self._update_server_list()
 
     def _update_server_list(self, event=None):
+        if not hasattr(self, 'scrollable_servers'): return # Выход если виджет еще не создан
         for widget in self.scrollable_servers.winfo_children():
             widget.destroy()
 
@@ -317,6 +323,12 @@ class FastPanelApp(ctk.CTk):
         self.fastuser_password_entry = ctk.CTkEntry(parent, width=400, height=40, show="*")
         self.fastuser_password_entry.pack(pady=(0, 15), fill="x", expand=True)
         if data: self.fastuser_password_entry.insert(0, data.get("admin_password", ""))
+        
+        ctk.CTkLabel(parent, text="Дата окончания (YYYY-MM-DD)", font=ctk.CTkFont(size=12), anchor="w").pack(fill="x", pady=(0, 5))
+        self.existing_server_expiration_entry = ctk.CTkEntry(parent, width=400, height=40)
+        self.existing_server_expiration_entry.pack(pady=(0, 15), fill="x", expand=True)
+        if data: self.existing_server_expiration_entry.insert(0, data.get("expiration_date", ""))
+
 
     def show_domain_tab(self):
         self.clear_tab_container()
@@ -338,11 +350,10 @@ class FastPanelApp(ctk.CTk):
                 domain_frame.pack(fill="x", pady=5, padx=5)
                 ctk.CTkLabel(domain_frame, text=f"🌐 {domain_info['domain']}", font=ctk.CTkFont(size=14, weight="bold")).pack(side="left", padx=10, pady=10)
                 
-                server_ips = [s['ip'] for s in self.servers if s.get('ip')]
-                if server_ips:
-                    server_var = ctk.StringVar(value=domain_info.get("server_ip", ""))
-                    server_menu = ctk.CTkOptionMenu(domain_frame, values=server_ips, variable=server_var, command=lambda ip, i=idx: self.update_domain_server(i, ip))
-                    server_menu.pack(side="right", padx=10, pady=10)
+                server_ips = ["(Не выбран)"] + [s['ip'] for s in self.servers if s.get('ip')]
+                server_var = ctk.StringVar(value=domain_info.get("server_ip") or "(Не выбран)")
+                server_menu = ctk.CTkOptionMenu(domain_frame, values=server_ips, variable=server_var, command=lambda ip, i=idx: self.update_domain_server(i, ip))
+                server_menu.pack(side="right", padx=10, pady=10)
     
     def show_add_domain_dialog(self):
         dialog = ctk.CTkToplevel(self)
@@ -360,17 +371,25 @@ class FastPanelApp(ctk.CTk):
 
     def add_domains(self, domains_text, dialog):
         domains = [d.strip() for d in domains_text.split("\n") if d.strip()]
+        added_count = 0
         for domain in domains:
             if not any(d['domain'] == domain for d in self.domains):
                 self.domains.append({"domain": domain, "server_ip": ""})
-        self.save_domains()
-        self.show_domain_tab()
+                added_count += 1
+        
+        if added_count > 0:
+            self.log_action(f"Добавлено {added_count} доменов")
+            self.save_domains()
+            self.show_domain_tab()
+
         dialog.destroy()
 
     def update_domain_server(self, index, server_ip):
-        self.domains[index]["server_ip"] = server_ip
+        ip_to_save = server_ip if server_ip != "(Не выбран)" else ""
+        self.domains[index]["server_ip"] = ip_to_save
         self.save_domains()
-        self.show_success(f"Сервер для домена {self.domains[index]['domain']} обновлен")
+        self.log_action(f"Для домена {self.domains[index]['domain']} установлен сервер {server_ip}")
+        self.show_success(f"Сервер для домена обновлен")
         
     def show_result_tab(self):
         self.clear_tab_container()
@@ -407,7 +426,12 @@ class FastPanelApp(ctk.CTk):
         self.clear_tab_container()
         self.page_title.configure(text="Логи")
         self.current_tab = "logs"
-        ctk.CTkLabel(self.tab_container, text="Вкладка логов", font=("Arial", 24)).pack(pady=20)
+        
+        logs_text = ctk.CTkTextbox(self.tab_container, wrap="word")
+        logs_text.pack(fill="both", expand=True)
+        
+        logs_text.insert("1.0", "\n".join(self.logs))
+        logs_text.configure(state="disabled")
 
     def _create_settings_section(self, parent, title, description):
         section = ctk.CTkFrame(parent, fg_color=("#ffffff", "#2b2b2b"), corner_radius=10)
@@ -529,7 +553,8 @@ class FastPanelApp(ctk.CTk):
     def _create_terminal_tab(self, parent, server_data):
         terminal_frame = ctk.CTkFrame(parent, fg_color="transparent")
         terminal_frame.pack(fill="both", expand=True)
-        # ... (Код для вкладки терминала, можно оставить как заглушку)
+        ctk.CTkLabel(terminal_frame, text="SSH Терминал", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=20)
+        ctk.CTkLabel(terminal_frame, text="Функционал терминала будет добавлен в следующей версии", font=ctk.CTkFont(size=12), text_color=("#666666", "#aaaaaa")).pack()
 
     def show_install_dialog(self, server_data):
         dialog = ctk.CTkToplevel(self)
@@ -604,7 +629,8 @@ class FastPanelApp(ctk.CTk):
             payload = {
                 "name": self.existing_server_name_entry.get(),
                 "admin_url": self.server_url_entry.get(),
-                "admin_password": self.fastuser_password_entry.get()
+                "admin_password": self.fastuser_password_entry.get(),
+                "expiration_date": self.existing_server_expiration_entry.get()
             }
             if not payload["admin_url"] or not payload["admin_password"]:
                 self.show_error("URL и пароль обязательны")
@@ -621,6 +647,7 @@ class FastPanelApp(ctk.CTk):
                 if s['id'] == server_data['id']:
                     self.servers[i].update(payload)
                     break
+            self.log_action(f"Сервер '{payload['name']}' обновлен")
             self.show_success(f"Сервер {payload['name']} обновлен")
         else:
             payload.update({
@@ -629,6 +656,7 @@ class FastPanelApp(ctk.CTk):
                 "created_at": datetime.now().isoformat(),
             })
             self.servers.append(payload)
+            self.log_action(f"Добавлен новый сервер: '{payload['name']}'")
             self.show_success(f"Сервер {payload['name']} добавлен")
 
         self.save_servers()
@@ -638,27 +666,32 @@ class FastPanelApp(ctk.CTk):
         self.servers = [s for s in self.servers if s["id"] != server_data["id"]]
         self.save_servers()
         dialog.destroy()
+        self.log_action(f"Сервер '{server_data['name']}' удален", level="WARNING")
         self.show_success(f"Сервер {server_data['name']} удален")
         self.show_servers_tab()
 
     def delete_domain_from_server(self, domain, server_data):
         self.domains = [d for d in self.domains if not (d['domain'] == domain['domain'] and d['server_ip'] == domain['server_ip'])]
         self.save_domains()
+        self.log_action(f"Домен {domain['domain']} удален с сервера {server_data['name']}", level="WARNING")
         self.show_success(f"Домен {domain['domain']} удален")
         self.show_server_management(server_data)
 
     def start_installation(self, server_data, password, log_widget, progress_widget):
+        self.log_action(f"Запуск установки FastPanel на сервер '{server_data['name']}'")
         log_widget.insert("end", "🚀 Начинаем установку FastPanel...\n")
         progress_widget.set(0.1)
         # ... (здесь будет реальный код установки)
 
     def _complete_installation(self, server_data, log_widget, progress_widget):
+        self.log_action(f"Установка FastPanel на сервер '{server_data['name']}' завершена", level="SUCCESS")
         log_widget.insert("end", "\n✅ FastPanel успешно установлен!\n")
         # ... (здесь будет реальный код после установки)
 
     def load_servers(self):
         try:
             with open("data/servers.json", 'r', encoding='utf-8') as f: self.servers = json.load(f)
+            self.log_action(f"Загружено {len(self.servers)} серверов")
         except (FileNotFoundError, json.JSONDecodeError): self.servers = []
 
     def save_servers(self):
@@ -668,6 +701,7 @@ class FastPanelApp(ctk.CTk):
     def load_domains(self):
         try:
             with open("data/domains.json", 'r', encoding='utf-8') as f: self.domains = json.load(f)
+            self.log_action(f"Загружено {len(self.domains)} доменов")
         except (FileNotFoundError, json.JSONDecodeError): self.domains = []
 
     def save_domains(self):
@@ -679,7 +713,12 @@ class FastPanelApp(ctk.CTk):
         self.load_domains()
         if self.current_tab == "servers": self.show_servers_tab()
         elif self.current_tab == "domain": self.show_domain_tab()
+        self.log_action("Данные обновлены")
         self.show_success("Данные обновлены")
+        
+    def log_action(self, message, level="INFO"):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.logs.append(f"[{timestamp}] {level}: {message}")
 
     def show_success(self, message):
         self.status_label.configure(text=f"✅ {message}", text_color=("#4caf50", "#4caf50"))
@@ -687,6 +726,7 @@ class FastPanelApp(ctk.CTk):
 
     def show_error(self, message):
         self.status_label.configure(text=f"❌ {message}", text_color=("#f44336", "#f44336"))
+        self.log_action(message, level="ERROR")
         self.after(3000, lambda: self.status_label.configure(text="● Готов к работе", text_color=("#4caf50", "#4caf50")))
 
 if __name__ == "__main__":
