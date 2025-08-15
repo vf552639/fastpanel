@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Запуск GUI версии FastPanel Automation
 """
@@ -5,6 +6,7 @@
 import sys
 import os
 from pathlib import Path
+import traceback
 
 # Добавляем корневую директорию в путь
 ROOT_DIR = Path(__file__).parent
@@ -45,14 +47,11 @@ def main():
     print("🚀 FastPanel Automation - GUI Version")
     print("-" * 40)
     
-    # Проверяем зависимости
     if not check_requirements():
         sys.exit(1)
     
-    # Создаем директории
     create_directories()
     
-    # Импортируем и запускаем приложение
     try:
         from src.ui.app import FastPanelApp
         
@@ -64,10 +63,11 @@ def main():
         
     except ImportError as e:
         print(f"❌ Ошибка импорта: {e}")
-        print("   Убедитесь, что файл src/ui/app.py существует")
+        print("   Убедитесь, что файл src/ui/app.py существует и все зависимости установлены.")
         sys.exit(1)
     except Exception as e:
-        print(f"❌ Ошибка запуска: {e}")
+        print(f"❌ Критическая ошибка при запуске: {e}")
+        traceback.print_exc()
         sys.exit(1)
 
 if __name__ == "__main__":
