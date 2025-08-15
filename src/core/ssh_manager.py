@@ -6,7 +6,10 @@ from typing import Optional, Tuple, List
 import logging
 from dataclasses import dataclass
 
-logger = logging.getLogger(__name__)
+from src.utils.logger import get_logger
+
+logger = get_logger("ssh_manager")
+
 
 @dataclass
 class SSHResult:
@@ -16,15 +19,16 @@ class SSHResult:
     stderr: str
     exit_code: int
 
+
 class SSHManager:
     """Менеджер SSH подключений"""
-    
+
     def __init__(self):
         self.client: Optional[paramiko.SSHClient] = None
         self.connected = False
         self.current_host = None
-    
-    def connect(self, host: str, username: str = "root", 
+
+    def connect(self, host: str, username: str = "root",
                 password: Optional[str] = None, port: int = 22,
                 timeout: int = 30) -> bool:
         """
@@ -33,12 +37,12 @@ class SSHManager:
         try:
             if self.client:
                 self.disconnect()
-            
+
             self.client = paramiko.SSHClient()
             self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            
+
             logger.info(f"Подключение к {host}:{port} как {username}")
-            
+
             self.client.connect(
                 hostname=host,
                 port=port,
@@ -48,12 +52,12 @@ class SSHManager:
                 allow_agent=False,
                 look_for_keys=False
             )
-            
+
             self.connected = True
             self.current_host = host
             logger.info(f"Успешное подключение к {host}")
             return True
-            
+
         except paramiko.AuthenticationException:
             logger.error(f"Ошибка аутентификации для {host}")
             return False
@@ -63,8 +67,8 @@ class SSHManager:
         except Exception as e:
             logger.error(f"Неожиданная ошибка при подключении к {host}: {e}")
             return False
-    
-    def execute(self, command: str, get_pty: bool = False, 
+
+    def execute(self, command: str, get_pty: bool = False,
                 timeout: Optional[int] = None) -> SSHResult:
         """
         Выполнение команды на удаленном сервере
@@ -72,86 +76,74 @@ class SSHManager:
         if not self.connected or not self.client:
             logger.error("Нет активного SSH подключения")
             return SSHResult(False, "", "Нет активного подключения", -1)
-        
+
         try:
-            logger.debug(f"Выполнение команды: {command[:50]}...")
-            
+            logger.debug(f"Выполнение команды: {command[:100]}...")
+
             stdin, stdout, stderr = self.client.exec_command(
-                command, 
+                command,
                 get_pty=get_pty,
                 timeout=timeout
             )
-            
-            # Читаем вывод
+
             stdout_text = stdout.read().decode('utf-8', errors='ignore')
             stderr_text = stderr.read().decode('utf-8', errors='ignore')
             exit_code = stdout.channel.recv_exit_status()
-            
+
             success = exit_code == 0
-            
+
             if success:
-                logger.debug(f"Команда выполнена успешно")
+                logger.debug(f"Команда выполнена успешно с кодом {exit_code}")
             else:
-                logger.warning(f"Команда завершилась с кодом {exit_code}")
-            
+                logger.warning(f"Команда завершилась с кодом {exit_code}. Stderr: {stderr_text[:100]}")
+
             return SSHResult(success, stdout_text, stderr_text, exit_code)
-            
+
         except Exception as e:
-            logger.error(f"Ошибка выполнения команды: {e}")
+            logger.error(f"Ошибка выполнения команды: {e}", exc_info=True)
             return SSHResult(False, "", str(e), -1)
-    
-    def execute_with_progress(self, command: str, 
-                            callback=None) -> SSHResult:
+
+    def execute_with_progress(self, command: str,
+                              callback=None) -> SSHResult:
         """
-        Выполнение команды с отслеживанием прогресса
+        Выполнение команды с отслеживанием прогресса в реальном времени.
         """
         if not self.connected or not self.client:
             return SSHResult(False, "", "Нет активного подключения", -1)
-        
+
         try:
-            stdin, stdout, stderr = self.client.exec_command(
-                command, 
-                get_pty=True
-            )
-            
+            stdin, stdout, stderr = self.client.exec_command(command, get_pty=True)
             output_lines = []
-            
-            # Читаем построчно для отображения прогресса
-            for line in iter(stdout.readline, ''):
-                if not line:
+
+            while not stdout.channel.exit_status_ready():
+                line = stdout.readline()
+                if line:
+                    decoded_line = line.strip()
+                    output_lines.append(decoded_line)
+                    if callback:
+                        callback(decoded_line)
+                else:
                     break
-                output_lines.append(line)
-                if callback:
-                    callback(line.strip())
             
-            stderr_text = stderr.read().decode('utf-8', errors='ignore')
+            # Собираем остатки
+            for line in stdout.readlines():
+                output_lines.append(line.strip())
+
+            stderr_text = "".join(stderr.readlines())
             exit_code = stdout.channel.recv_exit_status()
-            
+
             return SSHResult(
                 exit_code == 0,
-                ''.join(output_lines),
+                '\n'.join(output_lines),
                 stderr_text,
                 exit_code
             )
-            
+
         except Exception as e:
-            logger.error(f"Ошибка выполнения команды с прогрессом: {e}")
+            logger.error(f"Ошибка выполнения команды с прогрессом: {e}", exc_info=True)
             return SSHResult(False, "", str(e), -1)
-    
-    def test_connection(self) -> bool:
-        """
-        Проверка активности соединения
-        """
-        if not self.connected or not self.client:
-            return False
-        
-        try:
-            # Простая команда для проверки
-            result = self.execute("echo 'test'")
-            return result.success
-        except:
-            return False
-    
+
+
     def disconnect(self):
         """
         Закрытие SSH соединения
@@ -160,28 +152,15 @@ class SSHManager:
             try:
                 self.client.close()
                 logger.info(f"Отключение от {self.current_host}")
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"Ошибка при отключении: {e}")
             finally:
                 self.client = None
                 self.connected = False
                 self.current_host = None
     
     def __enter__(self):
-        """Контекстный менеджер - вход"""
         return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Контекстный менеджер - выход"""
-        self.disconnect()
 
-# Вспомогательная функция для быстрого выполнения команды
-def quick_execute(host: str, command: str, username: str = "root",
-                 password: Optional[str] = None, port: int = 22) -> SSHResult:
-    """
-    Быстрое выполнение одной команды без сохранения соединения
-    """
-    with SSHManager() as ssh:
-        if ssh.connect(host, username, password, port):
-            return ssh.execute(command)
-        return SSHResult(False, "", "Не удалось подключиться", -1)
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.disconnect()
