@@ -2,11 +2,12 @@
 FastPanel Service - все операции с FastPanel
 """
 import re
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, Callable
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 
-from src.core.ssh_manager import SSHManager, SSHResult
+from src.core.ssh_manager import SSHManager
 from src.utils.logger import get_logger
 from src.config import config
 
@@ -24,222 +25,115 @@ class FastPanelInfo:
 
 class FastPanelService:
     """Сервис для работы с FastPanel"""
-    
+
     def __init__(self, ssh_manager: SSHManager = None):
         self.ssh = ssh_manager or SSHManager()
-    
-    def check_installation(self, host: str, username: str = "root",
-                          password: str = None) -> FastPanelInfo:
-        """
-        Проверка установлен ли FastPanel
-        """
-        info = FastPanelInfo(installed=False)
-        
+
+    def _get_os_type(self) -> Optional[str]:
+        """Определяет тип ОС на сервере."""
         if not self.ssh.connected:
-            if not self.ssh.connect(host, username, password):
-                logger.error(f"Не удалось подключиться к {host}")
-                return info
+            return None
         
-        # Проверяем наличие FastPanel
-        result = self.ssh.execute("which fastpanel")
-        if result.success and result.stdout.strip():
-            info.installed = True
+        result = self.ssh.execute("cat /etc/os-release")
+        if not result.success:
+            return None
             
-            # Получаем версию
-            version_result = self.ssh.execute("fastpanel --version 2>/dev/null || echo 'unknown'")
-            if version_result.success:
-                info.version = version_result.stdout.strip()
+        os_info = dict(line.split('=', 1) for line in result.stdout.split('\n') if '=' in line)
+        os_name = os_info.get('NAME', '').strip('"').lower()
+
+        if "ubuntu" in os_name or "debian" in os_name:
+            return "debian"
+        if "centos" in os_name or "almalinux" in os_name or "rocky" in os_name:
+            return "centos"
             
-            # Формируем URL админки
-            info.admin_url = f"https://{host}:{config.fastpanel_admin_port}"
-            
-            # Проверяем статус сервисов
-            info.services_status = self._check_services()
-        
-        return info
-    
-    def install(self, host: str, username: str = "root",
-               password: str = None, callback=None) -> Dict[str, Any]:
+        return None
+
+    def install(self, host: str, username: str, password: str, callback: Optional[Callable] = None) -> Dict[str, Any]:
         """
-        Установка FastPanel на сервер
-        
-        Args:
-            host: IP или hostname сервера
-            username: SSH пользователь
-            password: SSH пароль
-            callback: Функция для отслеживания прогресса
-        
-        Returns:
-            Словарь с результатами установки
+        Установка FastPanel на сервер с детальным логгированием и определением ОС.
         """
-        result = {
-            'success': False,
-            'admin_url': None,
-            'admin_password': None,
-            'error': None,
-            'install_time': None
-        }
-        
+        result = {'success': False, 'admin_url': None, 'admin_password': "Not found", 'error': None}
+
+        def update_progress(message: str, progress: float):
+            if callback:
+                # Эта строка была исправлена. Логирование через SSH-транспорт убрано,
+                # так как оно вызывало ошибку до установки соединения.
+                callback(message, progress)
+
         try:
-            # Подключаемся если еще не подключены
-            if not self.ssh.connected:
-                if not self.ssh.connect(host, username, password):
-                    result['error'] = "Не удалось подключиться по SSH"
-                    return result
-            
-            # Проверяем не установлен ли уже
-            check = self.check_installation(host, username, password)
-            if check.installed:
-                result['error'] = "FastPanel уже установлен"
-                result['admin_url'] = check.admin_url
+            update_progress("Подключение...", 0.1)
+            if not self.ssh.connect(host, username, password):
+                result['error'] = "Не удалось подключиться по SSH"
+                update_progress(f"❌ Ошибка: {result['error']}", 0)
                 return result
             
-            logger.info(f"Начинаем установку FastPanel на {host}")
+            update_progress("Определение ОС...", 0.2)
+            os_type = self._get_os_type()
+            if not os_type:
+                result['error'] = "Не удалось определить ОС"
+                update_progress(f"❌ Ошибка: {result['error']}", 0)
+                return result
+            update_progress(f"ОС определена: {os_type.capitalize()}", 0.3)
+
+            prep_commands = {
+                "debian": "apt-get update -qq && apt-get install -y ca-certificates wget",
+                "centos": "yum makecache && yum install -y ca-certificates wget"
+            }
             
-            # Обновляем систему (опционально для MVP)
-            if callback:
-                callback("📦 Обновление системы...")
+            update_progress("Установка пакетов...", 0.4)
+            prep_command = prep_commands.get(os_type)
+            prep_result = self.ssh.execute(prep_command, timeout=300)
+            if not prep_result.success:
+                logger.warning(f"Не удалось выполнить команду подготовки: {prep_result.stderr}")
             
-            update_result = self.ssh.execute("apt-get update -qq", timeout=60)
-            if not update_result.success:
-                logger.warning("Не удалось обновить apt репозитории")
+            update_progress("Установка FASTPANEL...", 0.6)
+            install_cmd = "wget https://repo.fastpanel.direct/install_fastpanel.sh -O - | bash -"
             
-            # Скачиваем и запускаем установщик
-            if callback:
-                callback("📥 Загрузка установщика FastPanel...")
-            
-            install_cmd = f"wget -O - {config.fastpanel_install_url} | bash -"
-            
-            start_time = datetime.now()
-            
-            # Выполняем установку с отслеживанием прогресса
-            admin_password = None
-            
+            output_log = []
+            admin_url, admin_password = None, None
+
             def parse_output(line: str):
-                nonlocal admin_password
-                if callback:
-                    callback(f"  {line[:80]}...")  # Обрезаем длинные строки
+                nonlocal admin_url, admin_password
+                output_log.append(line)
+                update_progress(line, 0.6) # Keep progress at installation step
                 
-                # Ищем пароль администратора в выводе
-                if "admin password" in line.lower() or "пароль администратора" in line.lower():
-                    # Пытаемся извлечь пароль
-                    parts = line.split(":")
-                    if len(parts) > 1:
-                        potential_password = parts[-1].strip()
-                        if potential_password and len(potential_password) > 6:
-                            admin_password = potential_password
-                            logger.info(f"Найден пароль администратора")
+                # Поиск URL и пароля
+                if "https://" in line and ":8888" in line:
+                    url_match = re.search(r'(https?://\S+:8888)', line)
+                    if url_match:
+                        admin_url = url_match.group(1)
+                elif "ttp://" in line and ":8888" in line: # Исправление опечатки
+                    url_match = re.search(r'(ttps?://\S+:8888)', line.replace("ttp", "http"))
+                    if url_match:
+                        admin_url = url_match.group(1).replace(f"//{host}", f"//{host}")
                 
-                # Альтернативные паттерны для пароля
-                password_match = re.search(r'password:\s*(\S+)', line, re.IGNORECASE)
-                if password_match:
-                    admin_password = password_match.group(1)
-            
+                pass_match = re.search(r'(?:admin password|пароль администратора):\s*(\S+)', line, re.IGNORECASE)
+                if pass_match:
+                    admin_password = pass_match.group(1)
+
             install_result = self.ssh.execute_with_progress(install_cmd, parse_output)
-            
+
+            update_progress("Получение данных доступа...", 0.9)
+            if not admin_url:
+                admin_url = f"https://{host}:8888"
+
             if install_result.success:
-                result['success'] = True
-                result['admin_url'] = f"https://{host}:{config.fastpanel_admin_port}"
-                result['admin_password'] = admin_password or self._get_admin_password()
-                result['install_time'] = (datetime.now() - start_time).total_seconds()
-                
-                logger.info(f"FastPanel успешно установлен на {host}")
-                
-                if callback:
-                    callback("✅ Установка завершена успешно!")
+                result.update({
+                    'success': True,
+                    'admin_url': admin_url,
+                    'admin_password': admin_password,
+                    'install_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
+                update_progress("✅ Установка завершена!", 1.0)
             else:
-                result['error'] = f"Установка завершилась с ошибкой: {install_result.stderr}"
-                logger.error(f"Ошибка установки FastPanel: {install_result.stderr}")
-            
+                result['error'] = f"Ошибка установки:\n{''.join(install_result.stderr)}"
+                update_progress(f"❌ {result['error']}", 0)
+
         except Exception as e:
             result['error'] = str(e)
-            logger.error(f"Неожиданная ошибка при установке: {e}", exc_info=True)
-        
+            logger.error(f"Критическая ошибка при установке: {e}", exc_info=True)
+            update_progress(f"❌ Критическая ошибка: {e}", 0)
+        finally:
+            self.ssh.disconnect()
+            
         return result
-    
-    def create_site(self, domain: str, site_type: str = "php",
-                   php_version: str = "8.1") -> bool:
-        """
-        Создание нового сайта в FastPanel
-        """
-        if not self.ssh.connected:
-            logger.error("Нет активного SSH подключения")
-            return False
-        
-        try:
-            # Команда создания сайта (зависит от версии FastPanel)
-            cmd = f"fastpanel site create --domain {domain} --type {site_type}"
-            
-            if site_type == "php":
-                cmd += f" --php {php_version}"
-            
-            result = self.ssh.execute(cmd)
-            
-            if result.success:
-                logger.info(f"Сайт {domain} успешно создан")
-                return True
-            else:
-                logger.error(f"Ошибка создания сайта: {result.stderr}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Ошибка при создании сайта: {e}")
-            return False
-    
-    def _check_services(self) -> Dict[str, bool]:
-        """
-        Проверка статуса сервисов FastPanel
-        """
-        services = {}
-        service_names = ['nginx', 'mysql', 'php-fpm', 'fastpanel']
-        
-        for service in service_names:
-            result = self.ssh.execute(f"systemctl is-active {service}")
-            services[service] = result.stdout.strip() == "active"
-        
-        return services
-    
-    def _get_admin_password(self) -> Optional[str]:
-        """
-        Попытка получить пароль администратора из конфигов
-        """
-        # Пробуем разные способы получения пароля
-        locations = [
-            "/usr/local/fastpanel/conf/admin.passwd",
-            "/root/.fastpanel_password",
-            "/etc/fastpanel/admin.password"
-        ]
-        
-        for location in locations:
-            result = self.ssh.execute(f"cat {location} 2>/dev/null")
-            if result.success and result.stdout.strip():
-                return result.stdout.strip()
-        
-        # Если не нашли, генерируем команду сброса
-        logger.warning("Не удалось найти пароль администратора, требуется сброс")
-        return None
-    
-    def reset_admin_password(self) -> Optional[str]:
-        """
-        Сброс пароля администратора FastPanel
-        """
-        if not self.ssh.connected:
-            return None
-        
-        try:
-            # Команда сброса пароля (может отличаться в разных версиях)
-            result = self.ssh.execute("fastpanel admin password reset")
-            
-            if result.success:
-                # Пытаемся извлечь новый пароль из вывода
-                for line in result.stdout.split('\n'):
-                    if 'password' in line.lower():
-                        parts = line.split(':')
-                        if len(parts) > 1:
-                            return parts[-1].strip()
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"Ошибка сброса пароля: {e}")
-            return None
