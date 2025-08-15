@@ -14,6 +14,8 @@ import os
 import sys
 import uuid
 import webbrowser
+from src.services.fastpanel import FastPanelService
+from src.core.ssh_manager import SSHManager
 
 # Настройка внешнего вида
 ctk.set_appearance_mode("dark")
@@ -644,7 +646,9 @@ class FastPanelApp(ctk.CTk):
         buttons_frame = ctk.CTkFrame(content, fg_color="transparent")
         buttons_frame.pack(fill="x")
         ctk.CTkButton(buttons_frame, text="Отмена", width=100, fg_color="transparent", border_width=1, text_color=("#000000", "#ffffff"), border_color=("#e0e0e0", "#404040"), command=dialog.destroy).pack(side="left", padx=(0, 10))
-        ctk.CTkButton(buttons_frame, text="Начать установку", width=150, command=lambda: self.start_installation(server_data, password_entry.get(), log_text, progress)).pack(side="left")
+        #ctk.CTkButton(buttons_frame, text="Начать установку", width=150, command=lambda: self.start_installation(server_data, password_entry.get(), log_text, progress)).pack(side="left")
+        install_btn = ctk.CTkButton(buttons_frame, text="Начать установку", width=150, command=lambda: self.start_installation(server_data, password_entry.get(), log_text, progress, dialog))
+        install_btn.pack(side="left")
 
     def confirm_delete_server(self, server_data):
         dialog = ctk.CTkToplevel(self)
@@ -741,11 +745,75 @@ class FastPanelApp(ctk.CTk):
         self.show_success(f"Домен {domain['domain']} удален")
         self.show_server_management(server_data)
 
-    def start_installation(self, server_data, password, log_widget, progress_widget):
+    def start_installation(self, server_data, password, log_widget, progress_widget, dialog):
+        """Запускает процесс установки в отдельном потоке."""
+        log_widget.delete("1.0", "end")
+        log_widget.insert("1.0", "Подготовка к установке...\n")
         self.log_action(f"Запуск установки FastPanel на сервер '{server_data['name']}'")
-        log_widget.insert("end", "🚀 Начинаем установку FastPanel...\n")
-        progress_widget.set(0.1)
-        # ... (здесь будет реальный код установки)
+
+        # Создаем и запускаем поток для выполнения установки
+        install_thread = threading.Thread(
+            target=self._run_installation_in_thread,
+            args=(server_data, password, log_widget, progress_widget, dialog),
+            daemon=True
+        )
+        install_thread.start()
+
+    def _run_installation_in_thread(self, server_data, password, log_widget, progress_widget, dialog):
+        """
+        Этот метод выполняется в фоновом потоке. 
+        Он вызывает сервис установки и передает ему callback для обновления UI.
+        """
+        def update_ui_callback(message, progress):
+            """Безопасно обновляет GUI из фонового потока."""
+            def _update():
+                # Обрезаем длинные строки лога для лучшей читаемости
+                log_line = (message[:100] + '...') if len(message) > 100 else message
+                log_widget.insert("end", log_line + "\n")
+                log_widget.see("end")
+                progress_widget.set(progress)
+            self.after(0, _update)
+
+        # Вызов сервиса установки
+        service = FastPanelService()
+        result = service.install(
+            host=server_data['ip'],
+            username=server_data.get('ssh_user', 'root'),
+            password=password,
+            callback=update_ui_callback
+        )
+        
+        # По завершении передаем результат в основной поток для обработки
+        self.after(0, self._on_installation_finished, result, server_data, dialog)
+
+    def _on_installation_finished(self, result, server_data, dialog):
+        """
+        Этот метод вызывается в основном потоке после завершения установки.
+        Обрабатывает результат и обновляет данные.
+        """
+        if result['success']:
+            self.show_success(f"FastPanel на '{server_data['name']}' успешно установлен!")
+            self.log_action(f"Установка FastPanel на '{server_data['name']}' завершена успешно", level="SUCCESS")
+
+            # Обновляем данные сервера
+            for i, s in enumerate(self.servers):
+                if s['id'] == server_data['id']:
+                    self.servers[i].update({
+                        "fastpanel_installed": True,
+                        "admin_url": result['admin_url'],
+                        "admin_password": result['admin_password'],
+                        "install_date": result['install_time']
+                    })
+                    break
+            
+            self.save_servers()
+            self.refresh_data()
+            dialog.destroy()
+        else:
+            error_message = result.get('error', 'Неизвестная ошибка')
+            self.show_error("Ошибка установки!")
+            self.log_action(f"Ошибка установки на '{server_data['name']}': {error_message}", level="ERROR")
+
 
     def _complete_installation(self, server_data, log_widget, progress_widget):
         self.log_action(f"Установка FastPanel на сервер '{server_data['name']}' завершена", level="SUCCESS")
