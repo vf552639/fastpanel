@@ -56,8 +56,7 @@ class FastPanelService:
 
         def update_progress(message: str, progress: float):
             if callback:
-                # Эта строка была исправлена. Логирование через SSH-транспорт убрано,
-                # так как оно вызывало ошибку до установки соединения.
+                # Эта функция теперь безопасна и вызывает только callback
                 callback(message, progress)
 
         try:
@@ -80,13 +79,14 @@ class FastPanelService:
                 "centos": "yum makecache && yum install -y ca-certificates wget"
             }
             
-            update_progress("Установка пакетов...", 0.4)
+            update_progress("Установка системных пакетов...", 0.4)
             prep_command = prep_commands.get(os_type)
             prep_result = self.ssh.execute(prep_command, timeout=300)
             if not prep_result.success:
+                # Это некритичная ошибка, просто логируем
                 logger.warning(f"Не удалось выполнить команду подготовки: {prep_result.stderr}")
             
-            update_progress("Установка FASTPANEL...", 0.6)
+            update_progress("Запуск установщика FASTPANEL...", 0.6)
             install_cmd = "wget https://repo.fastpanel.direct/install_fastpanel.sh -O - | bash -"
             
             output_log = []
@@ -95,9 +95,9 @@ class FastPanelService:
             def parse_output(line: str):
                 nonlocal admin_url, admin_password
                 output_log.append(line)
-                update_progress(line, 0.6) # Keep progress at installation step
+                update_progress(line, 0.6) # Держим прогресс на 60% во время установки
                 
-                # Поиск URL и пароля
+                # Поиск URL
                 if "https://" in line and ":8888" in line:
                     url_match = re.search(r'(https?://\S+:8888)', line)
                     if url_match:
@@ -105,8 +105,10 @@ class FastPanelService:
                 elif "ttp://" in line and ":8888" in line: # Исправление опечатки
                     url_match = re.search(r'(ttps?://\S+:8888)', line.replace("ttp", "http"))
                     if url_match:
+                        # Корректируем URL, подставляя IP сервера
                         admin_url = url_match.group(1).replace(f"//{host}", f"//{host}")
                 
+                # Поиск пароля
                 pass_match = re.search(r'(?:admin password|пароль администратора):\s*(\S+)', line, re.IGNORECASE)
                 if pass_match:
                     admin_password = pass_match.group(1)
@@ -114,7 +116,7 @@ class FastPanelService:
             install_result = self.ssh.execute_with_progress(install_cmd, parse_output)
 
             update_progress("Получение данных доступа...", 0.9)
-            if not admin_url:
+            if not admin_url: # Если URL не был найден в логе
                 admin_url = f"https://{host}:8888"
 
             if install_result.success:
@@ -124,9 +126,9 @@ class FastPanelService:
                     'admin_password': admin_password,
                     'install_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 })
-                update_progress("✅ Установка завершена!", 1.0)
+                update_progress("✅ Установка успешно завершена!", 1.0)
             else:
-                result['error'] = f"Ошибка установки:\n{''.join(install_result.stderr)}"
+                result['error'] = f"Установка завершилась с ошибкой: \n{''.join(install_result.stderr or output_log)}"
                 update_progress(f"❌ {result['error']}", 0)
 
         except Exception as e:
