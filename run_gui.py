@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Запуск GUI версии FastPanel Automation
 """
