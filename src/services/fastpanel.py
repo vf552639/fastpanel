@@ -115,11 +115,22 @@ class FastPanelService:
                 nonlocal admin_url, admin_password
                 clean_line = line.strip()
                 if not clean_line: return
+                
+                # Убираем ANSI escape-коды
+                ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+                clean_line = ansi_escape.sub('', clean_line)
+
                 output_log.append(clean_line)
                 update_progress(clean_line, 0.5)
-                if "admin password" in clean_line.lower() or "пароль администратора" in clean_line.lower():
+
+                # --- ИСПРАВЛЕННАЯ ЛОГИКА ---
+                # Ищем "Password:" или "Пароль:" в начале строки (без учета регистра)
+                if clean_line.lower().lstrip().startswith("password:") or clean_line.lower().lstrip().startswith("пароль:"):
                     pass_match = re.search(r':\s*(\S+)', clean_line)
-                    if pass_match: admin_password = pass_match.group(1)
+                    if pass_match:
+                        admin_password = pass_match.group(1).strip()
+                        logger.info(f"Найден пароль администратора: {admin_password}")
+
                 if "https://" in clean_line and ":8888" in clean_line:
                     url_match = re.search(r'(https?://\S+:8888)', clean_line)
                     if url_match: admin_url = url_match.group(1)
@@ -129,7 +140,9 @@ class FastPanelService:
             update_progress("Получение данных доступа...", 0.9)
             if not admin_url: admin_url = f"https://{host}:8888"
 
-            if install_result.success and admin_password:
+            # Проверяем успешность установки по наличию ключевой фразы, а не только по коду выхода
+            success_phrase = "Congratulations! FASTPANEL successfully installed"
+            if (install_result.success or any(success_phrase in line for line in output_log)) and admin_password:
                 result.update({
                     'success': True, 'admin_url': admin_url, 'admin_password': admin_password,
                     'install_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
