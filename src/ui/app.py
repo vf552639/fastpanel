@@ -29,6 +29,7 @@ class ServerCard(ctk.CTkFrame):
 
         self.server_data = server_data
         self.on_click = on_click
+        self.app = self.winfo_toplevel()
 
         self.configure(
             corner_radius=10,
@@ -38,6 +39,7 @@ class ServerCard(ctk.CTkFrame):
         )
 
         self._create_widgets()
+        self.check_installation_status()
 
     def _create_widgets(self):
         main_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -57,8 +59,7 @@ class ServerCard(ctk.CTkFrame):
 
         ip_label = ctk.CTkLabel(info_frame, text=f"IP: {self.server_data.get('ip', 'Не указан')}", font=ctk.CTkFont(size=12), text_color=("#666666", "#aaaaaa"), anchor="w")
         ip_label.pack(fill="x")
-        
-        # Статус FastPanel под IP
+
         if self.server_data.get("fastpanel_installed"):
             status_badge = ctk.CTkLabel(info_frame, text="✅ FastPanel установлен", font=ctk.CTkFont(size=11), text_color=("#4caf50", "#2e7d32"), anchor="w")
             status_badge.pack(fill="x", pady=(2,0))
@@ -66,11 +67,9 @@ class ServerCard(ctk.CTkFrame):
             status_badge = ctk.CTkLabel(info_frame, text="⏳ Не установлен", font=ctk.CTkFont(size=11), text_color=("#ff9800", "#f57c00"), anchor="w")
             status_badge.pack(fill="x", pady=(2,0))
 
-        # Кнопка "Запустить автоматизацию"
         automation_btn = ctk.CTkButton(top_frame, text="▶️ Запустить автоматизацию", command=lambda: self._on_start_automation())
         automation_btn.pack(side="right", padx=(10,0))
         
-        # Проверка, есть ли домены для этого сервера
         app = self.winfo_toplevel()
         server_has_domains = any(d.get("server_ip") == self.server_data.get("ip") for d in app.domains)
         if not server_has_domains:
@@ -83,21 +82,45 @@ class ServerCard(ctk.CTkFrame):
         bottom_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
         bottom_frame.pack(fill="x")
 
+        # --- WIDGETS FOR INSTALLATION ---
+        self.install_progress = ctk.CTkProgressBar(bottom_frame)
+        self.install_progress.set(0)
+        
+        self.log_button = ctk.CTkButton(bottom_frame, text="Посмотреть лог", width=120, height=28, font=ctk.CTkFont(size=12), command=self._on_show_log)
+        
+        # --- REGULAR WIDGETS ---
         if self.server_data.get("fastpanel_installed"):
-            manage_btn = ctk.CTkButton(bottom_frame, text="Управление", width=100, height=28, font=ctk.CTkFont(size=12), command=lambda: self._on_manage())
-            manage_btn.pack(side="left", padx=(0, 5))
-            panel_btn = ctk.CTkButton(bottom_frame, text="Открыть панель", width=100, height=28, font=ctk.CTkFont(size=12), fg_color=("#4caf50", "#2e7d32"), hover_color=("#45a049", "#1b5e20"), command=lambda: self._open_panel())
-            panel_btn.pack(side="left", padx=5)
+            self.manage_btn = ctk.CTkButton(bottom_frame, text="Управление", width=100, height=28, font=ctk.CTkFont(size=12), command=lambda: self._on_manage())
+            self.manage_btn.pack(side="left", padx=(0, 5))
+            self.panel_btn = ctk.CTkButton(bottom_frame, text="Открыть панель", width=100, height=28, font=ctk.CTkFont(size=12), fg_color=("#4caf50", "#2e7d32"), hover_color=("#45a049", "#1b5e20"), command=lambda: self._open_panel())
+            self.panel_btn.pack(side="left", padx=5)
         else:
-            install_btn = ctk.CTkButton(bottom_frame, text="Установить FastPanel", width=150, height=28, font=ctk.CTkFont(size=12), fg_color=("#2196f3", "#1976d2"), hover_color=("#1976d2", "#1565c0"), command=lambda: self._on_install())
-            install_btn.pack(side="left")
+            self.install_btn = ctk.CTkButton(bottom_frame, text="Установить FastPanel", width=150, height=28, font=ctk.CTkFont(size=12), fg_color=("#2196f3", "#1976d2"), hover_color=("#1976d2", "#1565c0"), command=lambda: self._on_install())
+            self.install_btn.pack(side="left")
 
-        delete_btn = ctk.CTkButton(bottom_frame, text="🗑️", width=30, height=28, fg_color=("#f44336", "#d32f2f"), hover_color=("#da190b", "#b71c1c"), command=lambda: self._on_delete())
-        delete_btn.pack(side="right")
+        self.delete_btn = ctk.CTkButton(bottom_frame, text="🗑️", width=30, height=28, fg_color=("#f44336", "#d32f2f"), hover_color=("#da190b", "#b71c1c"), command=lambda: self._on_delete())
+        self.delete_btn.pack(side="right")
 
-        edit_btn = ctk.CTkButton(bottom_frame, text="✏️", width=30, height=28, command=lambda: self._on_edit())
-        edit_btn.pack(side="right", padx=5)
+        self.edit_btn = ctk.CTkButton(bottom_frame, text="✏️", width=30, height=28, command=lambda: self._on_edit())
+        self.edit_btn.pack(side="right", padx=5)
 
+    def set_install_mode(self, installing=True):
+        if installing:
+            self.install_btn.pack_forget()
+            self.manage_btn.pack_forget() if hasattr(self, 'manage_btn') else None
+            self.panel_btn.pack_forget() if hasattr(self, 'panel_btn') else None
+            
+            self.install_progress.pack(side="left", fill="x", expand=True, padx=(0,10))
+            self.log_button.pack(side="left")
+        else:
+            self.install_progress.pack_forget()
+            self.log_button.pack_forget()
+            self._update_server_list() # Redraw the card
+
+    def check_installation_status(self):
+        server_id = self.server_data.get("id")
+        if server_id in self.app.installation_states and self.app.installation_states[server_id].get("installing"):
+            self.set_install_mode(True)
 
     def _on_manage(self):
         if self.on_click: self.on_click("manage", self.server_data)
@@ -116,6 +139,9 @@ class ServerCard(ctk.CTkFrame):
         
     def _on_start_automation(self):
         if self.on_click: self.on_click("start_automation", self.server_data)
+        
+    def _on_show_log(self):
+        if self.on_click: self.on_click("show_log", self.server_data)
 
 class FastPanelApp(ctk.CTk):
     def __init__(self):
@@ -129,6 +155,7 @@ class FastPanelApp(ctk.CTk):
         self.domains = []
         self.logs = []
         self.current_tab = "servers"
+        self.installation_states = {} # For tracking background installations
 
         self.log_action("Приложение запущено")
 
@@ -241,7 +268,13 @@ class FastPanelApp(ctk.CTk):
             ctk.CTkLabel(empty_frame, text="Добавьте первый сервер, чтобы начать работу", font=ctk.CTkFont(size=14), text_color=("#666666", "#aaaaaa")).pack()
         else:
             for server in filtered_servers:
-                ServerCard(self.scrollable_servers, server, on_click=self.handle_server_action).pack(fill="x", pady=5)
+                card = ServerCard(self.scrollable_servers, server, on_click=self.handle_server_action)
+                card.pack(fill="x", pady=5)
+                # Store reference to the card for updates
+                server_id = server.get("id")
+                if server_id and server_id in self.installation_states:
+                    self.installation_states[server_id]['card'] = card
+
 
     def show_add_server_tab(self, server_data=None):
         self.clear_tab_container()
@@ -504,11 +537,12 @@ class FastPanelApp(ctk.CTk):
     def handle_server_action(self, action, server_data):
         actions = {
             "manage": self.show_server_management,
-            "install": self.show_install_dialog,
+            "install": self.start_installation,
             "open_panel": lambda s: webbrowser.open(s.get("admin_url")) if s.get("admin_url") else None,
             "delete": self.confirm_delete_server,
             "edit": self.show_add_server_tab,
-            "start_automation": self.start_automation
+            "start_automation": self.start_automation,
+            "show_log": self.show_log_window,
         }
         if action in actions:
             actions[action](server_data)
@@ -622,34 +656,6 @@ class FastPanelApp(ctk.CTk):
         ctk.CTkLabel(terminal_frame, text="SSH Терминал", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=20)
         ctk.CTkLabel(terminal_frame, text="Функционал терминала будет добавлен в следующей версии", font=ctk.CTkFont(size=12), text_color=("#666666", "#aaaaaa")).pack()
 
-    def show_install_dialog(self, server_data):
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Установка FastPanel")
-        dialog.geometry("600x550")
-        dialog.transient(self)
-        dialog.grab_set()
-
-        content = ctk.CTkFrame(dialog, fg_color="transparent")
-        content.pack(fill="both", expand=True, padx=30, pady=30)
-        ctk.CTkLabel(content, text="🚀 Установка FastPanel", font=ctk.CTkFont(size=20, weight="bold")).pack(pady=(0, 20))
-        ctk.CTkLabel(content, text=f"Сервер: {server_data['name']} ({server_data['ip']})", font=ctk.CTkFont(size=12)).pack(pady=(0, 20))
-        
-        password_entry = ctk.CTkEntry(content, placeholder_text="Введите SSH пароль", show="*", height=40)
-        password_entry.pack(fill="x", pady=(0, 20))
-        if server_data.get("password"): password_entry.insert(0, server_data["password"])
-
-        progress = ctk.CTkProgressBar(content)
-        progress.pack(fill="x", pady=10)
-        progress.set(0)
-        log_text = ctk.CTkTextbox(content, height=150, font=ctk.CTkFont(size=10))
-        log_text.pack(fill="both", expand=True, pady=(10, 20))
-        buttons_frame = ctk.CTkFrame(content, fg_color="transparent")
-        buttons_frame.pack(fill="x")
-        ctk.CTkButton(buttons_frame, text="Отмена", width=100, fg_color="transparent", border_width=1, text_color=("#000000", "#ffffff"), border_color=("#e0e0e0", "#404040"), command=dialog.destroy).pack(side="left", padx=(0, 10))
-        #ctk.CTkButton(buttons_frame, text="Начать установку", width=150, command=lambda: self.start_installation(server_data, password_entry.get(), log_text, progress)).pack(side="left")
-        install_btn = ctk.CTkButton(buttons_frame, text="Начать установку", width=150, command=lambda: self.start_installation(server_data, password_entry.get(), log_text, progress, dialog))
-        install_btn.pack(side="left")
-
     def confirm_delete_server(self, server_data):
         dialog = ctk.CTkToplevel(self)
         dialog.title("Подтверждение удаления")
@@ -745,36 +751,52 @@ class FastPanelApp(ctk.CTk):
         self.show_success(f"Домен {domain['domain']} удален")
         self.show_server_management(server_data)
 
-    def start_installation(self, server_data, password, log_widget, progress_widget, dialog):
-        """Запускает процесс установки в отдельном потоке."""
-        log_widget.delete("1.0", "end")
-        log_widget.insert("1.0", "Подготовка к установке...\n")
+    def start_installation(self, server_data):
+        server_id = server_data.get("id")
+        if not server_id or server_id in self.installation_states and self.installation_states[server_id].get("installing"):
+            self.show_error("Установка уже запущена")
+            return
+            
+        password = server_data.get("password")
+        if not password:
+            self.show_error("Пароль SSH не найден для этого сервера.")
+            return
+
         self.log_action(f"Запуск установки FastPanel на сервер '{server_data['name']}'")
 
-        # Создаем и запускаем поток для выполнения установки
+        self.installation_states[server_id] = {
+            "installing": True,
+            "log": [],
+            "progress": 0.0,
+            "card": None,
+            "log_window": None
+        }
+
+        self._update_server_list()
+        
         install_thread = threading.Thread(
             target=self._run_installation_in_thread,
-            args=(server_data, password, log_widget, progress_widget, dialog),
+            args=(server_data, password, server_id),
             daemon=True
         )
         install_thread.start()
 
-    def _run_installation_in_thread(self, server_data, password, log_widget, progress_widget, dialog):
-        """
-        Этот метод выполняется в фоновом потоке. 
-        Он вызывает сервис установки и передает ему callback для обновления UI.
-        """
+    def _run_installation_in_thread(self, server_data, password, server_id):
         def update_ui_callback(message, progress):
-            """Безопасно обновляет GUI из фонового потока."""
             def _update():
-                # Обрезаем длинные строки лога для лучшей читаемости
-                log_line = (message[:100] + '...') if len(message) > 100 else message
-                log_widget.insert("end", log_line + "\n")
-                log_widget.see("end")
-                progress_widget.set(progress)
+                state = self.installation_states[server_id]
+                state["log"].append(message)
+                state["progress"] = progress
+                
+                if state.get("card"):
+                    state["card"].install_progress.set(progress)
+                
+                if state.get("log_window"):
+                    state["log_window"].log_text.insert("end", message + "\n")
+                    state["log_window"].log_text.see("end")
+
             self.after(0, _update)
 
-        # Вызов сервиса установки
         service = FastPanelService()
         result = service.install(
             host=server_data['ip'],
@@ -783,19 +805,15 @@ class FastPanelApp(ctk.CTk):
             callback=update_ui_callback
         )
         
-        # По завершении передаем результат в основной поток для обработки
-        self.after(0, self._on_installation_finished, result, server_data, dialog)
+        self.after(0, self._on_installation_finished, result, server_data, server_id)
 
-    def _on_installation_finished(self, result, server_data, dialog):
-        """
-        Этот метод вызывается в основном потоке после завершения установки.
-        Обрабатывает результат и обновляет данные.
-        """
+    def _on_installation_finished(self, result, server_data, server_id):
+        self.installation_states[server_id]["installing"] = False
+        
         if result['success']:
             self.show_success(f"FastPanel на '{server_data['name']}' успешно установлен!")
             self.log_action(f"Установка FastPanel на '{server_data['name']}' завершена успешно", level="SUCCESS")
 
-            # Обновляем данные сервера
             for i, s in enumerate(self.servers):
                 if s['id'] == server_data['id']:
                     self.servers[i].update({
@@ -807,18 +825,46 @@ class FastPanelApp(ctk.CTk):
                     break
             
             self.save_servers()
-            self.refresh_data()
-            dialog.destroy()
         else:
             error_message = result.get('error', 'Неизвестная ошибка')
             self.show_error("Ошибка установки!")
             self.log_action(f"Ошибка установки на '{server_data['name']}': {error_message}", level="ERROR")
+        
+        self.refresh_data()
 
+    def show_log_window(self, server_data):
+        server_id = server_data.get("id")
+        if not server_id in self.installation_states:
+            return
 
-    def _complete_installation(self, server_data, log_widget, progress_widget):
-        self.log_action(f"Установка FastPanel на сервер '{server_data['name']}' завершена", level="SUCCESS")
-        log_widget.insert("end", "\n✅ FastPanel успешно установлен!\n")
-        # ... (здесь будет реальный код после установки)
+        state = self.installation_states[server_id]
+        if state.get("log_window"):
+            state["log_window"].lift()
+            return
+            
+        log_window = ctk.CTkToplevel(self)
+        log_window.title(f"Лог установки: {server_data['name']}")
+        log_window.geometry("700x500")
+        
+        state["log_window"] = log_window
+        
+        log_window.log_text = ctk.CTkTextbox(log_window, wrap="word")
+        log_window.log_text.pack(fill="both", expand=True, padx=10, pady=(10,0))
+        log_window.log_text.insert("1.0", "\n".join(state["log"]))
+        log_window.log_text.see("end")
+        
+        def copy_log():
+            self.clipboard_clear()
+            self.clipboard_append(log_window.log_text.get("1.0", "end"))
+        
+        ctk.CTkButton(log_window, text="Копировать лог", command=copy_log).pack(pady=10)
+
+        def on_close():
+            state["log_window"] = None
+            log_window.destroy()
+        
+        log_window.protocol("WM_DELETE_WINDOW", on_close)
+
 
     def load_servers(self):
         try:
