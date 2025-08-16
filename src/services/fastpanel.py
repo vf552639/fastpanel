@@ -54,9 +54,51 @@ class FastPanelService:
         
         return None
 
+    def _configure_firewall(self, callback: Optional[Callable] = None):
+        """Проверяет и настраивает UFW для доступа к FastPanel."""
+        if callback:
+            callback("Проверка настроек файрвола (UFW)...", 0.9)
+
+        status_result = self.ssh.execute("sudo ufw status")
+        
+        # Если UFW неактивен, ничего делать не нужно
+        if "Status: inactive" in status_result.stdout:
+            if callback:
+                callback("Файрвол неактивен, порт 8888 должен быть доступен.", 0.95)
+            return
+
+        # Проверяем, открыт ли уже порт 8888
+        if "8888/tcp" in status_result.stdout and "ALLOW" in status_result.stdout:
+            if callback:
+                callback("Порт 8888 уже открыт в файрволе.", 0.95)
+            return
+        
+        # Если порт закрыт, открываем его
+        if callback:
+            callback("Порт 8888 закрыт. Открываем...", 0.92)
+        
+        allow_result = self.ssh.execute("sudo ufw allow 8888/tcp")
+        if not allow_result.success:
+            logger.warning("Не удалось выполнить команду 'ufw allow 8888/tcp'.")
+            if callback:
+                callback("⚠️ Не удалось добавить правило для порта 8888.", 0.95)
+            return # Прерываем, так как reload не имеет смысла
+
+        if callback:
+            callback("Правило для порта 8888 добавлено. Обновляем файрвол...", 0.95)
+        
+        reload_result = self.ssh.execute("sudo ufw reload")
+        if reload_result.success:
+            if callback:
+                callback("✅ Файрвол успешно обновлен.", 0.98)
+        else:
+            logger.warning("Не удалось выполнить команду 'ufw reload'.")
+            if callback:
+                callback("⚠️ Не удалось перезагрузить файрвол.", 0.98)
+
     def install(self, host: str, username: str, password: str, callback: Optional[Callable] = None) -> Dict[str, Any]:
         """
-        Установка FastPanel с предварительной проверкой совместимости ОС.
+        Установка FastPanel с предварительной проверкой совместимости ОС и настройкой файрвола.
         """
         result = {'success': False, 'admin_url': None, 'admin_password': "Not found", 'error': None}
 
@@ -83,12 +125,10 @@ class FastPanelService:
             os_name, os_family, os_version = os_data['name'], os_data['family'], os_data['version']
             update_progress(f"ОС определена: {os_name} {os_version}", 0.2)
 
-            # --- ПРОВЕРКА СОВМЕСТИМОСТИ ---
             supported_versions = ["20.04", "22.04"]
             if os_family == "debian" and not any(v in os_version for v in supported_versions):
                 result['error'] = f"Версия {os_name} {os_version} не поддерживается установщиком FastPanel."
                 update_progress(f"❌ Ошибка: {result['error']}", 0)
-                update_progress("Используйте Ubuntu 20.04 или 22.04.", 0)
                 return result
 
             prep_commands = {
@@ -116,15 +156,12 @@ class FastPanelService:
                 clean_line = line.strip()
                 if not clean_line: return
                 
-                # Убираем ANSI escape-коды
                 ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
                 clean_line = ansi_escape.sub('', clean_line)
 
                 output_log.append(clean_line)
                 update_progress(clean_line, 0.5)
 
-                # --- ИСПРАВЛЕННАЯ ЛОГИКА ---
-                # Ищем "Password:" или "Пароль:" в начале строки (без учета регистра)
                 if clean_line.lower().lstrip().startswith("password:") or clean_line.lower().lstrip().startswith("пароль:"):
                     pass_match = re.search(r':\s*(\S+)', clean_line)
                     if pass_match:
@@ -137,17 +174,22 @@ class FastPanelService:
 
             install_result = self.ssh.execute_with_progress(install_cmd, parse_output)
 
-            update_progress("Получение данных доступа...", 0.9)
+            update_progress("Установка завершена. Обработка результатов...", 0.85)
             if not admin_url: admin_url = f"https://{host}:8888"
 
-            # Проверяем успешность установки по наличию ключевой фразы, а не только по коду выхода
             success_phrase = "Congratulations! FASTPANEL successfully installed"
             if (install_result.success or any(success_phrase in line for line in output_log)) and admin_password:
+                
+                # --- НОВЫЙ БЛОК: НАСТРОЙКА ФАЙРВОЛА ---
+                if os_family == "debian": # UFW используется в основном на Debian/Ubuntu
+                    self._configure_firewall(update_progress)
+                # --- КОНЕЦ НОВОГО БЛОКА ---
+
                 result.update({
                     'success': True, 'admin_url': admin_url, 'admin_password': admin_password,
                     'install_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 })
-                update_progress("✅ Установка успешно завершена!", 1.0)
+                update_progress("✅ Установка и настройка успешно завершены!", 1.0)
             else:
                 error_details = install_result.stderr or "\n".join(output_log[-10:])
                 result['error'] = f"Установка завершилась с ошибкой: {error_details}"
