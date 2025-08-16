@@ -16,6 +16,9 @@ import uuid
 import webbrowser
 from src.services.fastpanel import FastPanelService
 from src.core.ssh_manager import SSHManager
+from functools import partial
+from src.services.cloudflare_service import CloudflareService
+from src.services.namecheap_service import NamecheapService
 
 # Настройка внешнего вида
 ctk.set_appearance_mode("dark")
@@ -156,6 +159,9 @@ class FastPanelApp(ctk.CTk):
         self.logs = []
         self.current_tab = "servers"
         self.installation_states = {} # For tracking background installations
+        self.domain_widgets = {} # To store references to domain widgets
+        self.selected_domains = set()
+        self.load_credentials() # Load API credentials
 
         self.log_action("Приложение запущено")
 
@@ -380,10 +386,25 @@ class FastPanelApp(ctk.CTk):
         self.clear_tab_container()
         self.page_title.configure(text="Управление доменами")
         self.current_tab = "domain"
+        self.domain_widgets.clear()
+        self.selected_domains.clear()
 
-        top_panel = ctk.CTkFrame(self.tab_container, fg_color="transparent")
-        top_panel.pack(fill="x", pady=(0, 10))
-        ctk.CTkButton(top_panel, text="➕ Добавить домен(-ы)", command=self.show_add_domain_dialog).pack(side="left")
+        action_panel = ctk.CTkFrame(self.tab_container, fg_color="transparent")
+        action_panel.pack(fill="x", pady=(0, 10))
+
+        ctk.CTkButton(action_panel, text="➕ Добавить домен(-ы)", command=self.show_add_domain_dialog).pack(side="left")
+
+        self.bind_cf_button = ctk.CTkButton(action_panel, text="🔗 Привязать к Cloudflare", state="disabled", command=self.start_cloudflare_binding)
+        self.bind_cf_button.pack(side="left", padx=10)
+
+
+        # Header for the list
+        header_frame = ctk.CTkFrame(self.tab_container, fg_color=("#e0e0e0", "#333333"), height=30)
+        header_frame.pack(fill="x", pady=5)
+        ctk.CTkLabel(header_frame, text="Домен", width=250, anchor="w").pack(side="left", padx=50)
+        ctk.CTkLabel(header_frame, text="Сервер", width=150, anchor="w").pack(side="left", padx=10)
+        ctk.CTkLabel(header_frame, text="Статус Cloudflare", width=150, anchor="w").pack(side="left", padx=10)
+        ctk.CTkLabel(header_frame, text="NS-серверы Cloudflare", anchor="w").pack(side="left", padx=10, fill="x", expand=True)
 
         domain_list_frame = ctk.CTkScrollableFrame(self.tab_container, fg_color="transparent")
         domain_list_frame.pack(fill="both", expand=True)
@@ -391,16 +412,152 @@ class FastPanelApp(ctk.CTk):
         if not self.domains:
             ctk.CTkLabel(domain_list_frame, text="Нет добавленных доменов").pack(pady=20)
         else:
-            for idx, domain_info in enumerate(self.domains):
-                domain_frame = ctk.CTkFrame(domain_list_frame, fg_color=("#ffffff", "#2b2b2b"), corner_radius=8)
-                domain_frame.pack(fill="x", pady=5, padx=5)
-                ctk.CTkLabel(domain_frame, text=f"🌐 {domain_info['domain']}", font=ctk.CTkFont(size=14, weight="bold")).pack(side="left", padx=10, pady=10)
-                
-                server_ips = ["(Не выбран)"] + [s['ip'] for s in self.servers if s.get('ip')]
-                server_var = ctk.StringVar(value=domain_info.get("server_ip") or "(Не выбран)")
-                server_menu = ctk.CTkOptionMenu(domain_frame, values=server_ips, variable=server_var, command=lambda ip, i=idx: self.update_domain_server(i, ip))
-                server_menu.pack(side="right", padx=10, pady=10)
+            for domain_info in self.domains:
+                self.add_domain_row(domain_list_frame, domain_info)
+
+    def add_domain_row(self, parent, domain_info):
+        domain = domain_info["domain"]
+        domain_frame = ctk.CTkFrame(parent, fg_color=("#ffffff", "#2b2b2b"), corner_radius=0, border_width=1, border_color=("#e0e0e0", "#404040"))
+        domain_frame.pack(fill="x", pady=2)
+
+        # Checkbox
+        var = ctk.BooleanVar()
+        checkbox = ctk.CTkCheckBox(domain_frame, text="", variable=var, command=lambda d=domain: self.toggle_domain_selection(d, var))
+        checkbox.pack(side="left", padx=10)
+
+        # Domain Label
+        ctk.CTkLabel(domain_frame, text=f"🌐 {domain}", font=ctk.CTkFont(size=14), width=250, anchor="w").pack(side="left", padx=10)
+
+        # Server Dropdown
+        server_ips = ["(Не выбран)"] + [s['ip'] for s in self.servers if s.get('ip')]
+        server_var = ctk.StringVar(value=domain_info.get("server_ip") or "(Не выбран)")
+        server_menu = ctk.CTkOptionMenu(domain_frame, values=server_ips, variable=server_var, width=150, command=lambda ip, d=domain: self.update_domain_server(d, ip))
+        server_menu.pack(side="left", padx=10)
+
+        # Cloudflare Status
+        status_colors = { "none": ("#666666", "#aaaaaa"), "pending": ("#ff9800", "#f57c00"), "active": ("#4caf50", "#2e7d32"), "error": ("#f44336", "#d32f2f") }
+        status_text = { "none": "⚪ Не привязан", "pending": "🟡 В процессе...", "active": "🟢 Активен", "error": "🔴 Ошибка" }
+        status = domain_info.get("cloudflare_status", "none")
+        status_label = ctk.CTkLabel(domain_frame, text=status_text.get(status), text_color=status_colors.get(status), width=150, anchor="w")
+        status_label.pack(side="left", padx=10)
+
+        # NS Servers
+        ns_servers = ", ".join(domain_info.get("cloudflare_ns", []))
+        ns_label = ctk.CTkLabel(domain_frame, text=ns_servers, anchor="w")
+        ns_label.pack(side="left", padx=10, fill="x", expand=True)
+
+        self.domain_widgets[domain] = {"frame": domain_frame, "status_label": status_label, "ns_label": ns_label}
+
+
+    def toggle_domain_selection(self, domain, var):
+        if var.get():
+            self.selected_domains.add(domain)
+        else:
+            self.selected_domains.discard(domain)
+        
+        if self.selected_domains:
+            self.bind_cf_button.configure(state="normal")
+        else:
+            self.bind_cf_button.configure(state="disabled")
+
+    def update_domain_server(self, domain, server_ip):
+        ip_to_save = server_ip if server_ip != "(Не выбран)" else ""
+        for d in self.domains:
+            if d["domain"] == domain:
+                d["server_ip"] = ip_to_save
+                break
+        self.save_domains()
+        self.log_action(f"Для домена {domain} установлен сервер {server_ip}")
+        self.show_success(f"Сервер для домена обновлен")
     
+    def start_cloudflare_binding(self):
+        # Validation of API credentials
+        if not self.credentials.get("cloudflare_token"):
+            self.show_error("Не указан API токен для Cloudflare в настройках.")
+            return
+        if not self.credentials.get("namecheap_user") or not self.credentials.get("namecheap_key") or not self.credentials.get("namecheap_ip"):
+            self.show_error("Не указаны все данные для Namecheap в настройках.")
+            return
+
+        # Validation of domain-server association
+        for domain_name in self.selected_domains:
+            domain_info = next((d for d in self.domains if d["domain"] == domain_name), None)
+            if not domain_info or not domain_info.get("server_ip"):
+                self.show_error(f"Домен '{domain_name}' не ассоциирован с сервером.")
+                return
+
+        # Start threads
+        for domain_name in self.selected_domains:
+            self.update_domain_status_ui(domain_name, "pending")
+            thread = threading.Thread(target=self._bind_domain_thread, args=(domain_name,), daemon=True)
+            thread.start()
+
+    def _bind_domain_thread(self, domain_name):
+        self.log_action(f"Начата привязка домена {domain_name} к Cloudflare.")
+        
+        # Get domain info
+        domain_info = next((d for d in self.domains if d["domain"] == domain_name), None)
+        server_ip = domain_info["server_ip"]
+        
+        # Initialize services
+        cf_service = CloudflareService(self.credentials.get("cloudflare_token"))
+        nc_service = NamecheapService(
+            self.credentials.get("namecheap_user"),
+            self.credentials.get("namecheap_key"),
+            self.credentials.get("namecheap_ip")
+        )
+
+        # Step 1: Add zone to Cloudflare
+        zone_info = cf_service.add_zone(domain_name)
+        if not zone_info:
+            self.log_action(f"Ошибка добавления зоны {domain_name} в Cloudflare.", "ERROR")
+            self.update_domain_status_ui(domain_name, "error")
+            return
+        zone_id, name_servers = zone_info
+        self.log_action(f"Зона {domain_name} успешно создана в Cloudflare.", "SUCCESS")
+
+        # Step 2: Create A-records
+        if not cf_service.create_a_records(zone_id, server_ip):
+            self.log_action(f"Ошибка создания A-записей для {domain_name}.", "ERROR")
+            self.update_domain_status_ui(domain_name, "error")
+            return
+        self.log_action(f"A-записи для {domain_name} созданы.", "SUCCESS")
+
+        # Step 3: Update NS records at Namecheap
+        if not nc_service.update_nameservers(domain_name, name_servers):
+            self.log_action(f"Ошибка обновления NS-серверов в Namecheap для {domain_name}", "ERROR")
+            self.update_domain_status_ui(domain_name, "error")
+            return
+        self.log_action(f"NS-записи для {domain_name} обновлены в Namecheap.", "SUCCESS")
+
+        # Step 4: Finalize
+        self.update_domain_status_ui(domain_name, "active", name_servers)
+        self.log_action(f"Домен {domain_name} успешно привязан.", "SUCCESS")
+
+
+    def update_domain_status_ui(self, domain, status, ns_servers=None):
+        def _update():
+            # Update data structure
+            for d in self.domains:
+                if d["domain"] == domain:
+                    d["cloudflare_status"] = status
+                    if ns_servers:
+                        d["cloudflare_ns"] = ns_servers
+                    break
+            self.save_domains()
+            
+            # Update UI
+            if domain in self.domain_widgets:
+                widget_refs = self.domain_widgets[domain]
+                status_colors = { "none": ("#666666", "#aaaaaa"), "pending": ("#ff9800", "#f57c00"), "active": ("#4caf50", "#2e7d32"), "error": ("#f44336", "#d32f2f") }
+                status_text = { "none": "⚪ Не привязан", "pending": "🟡 В процессе...", "active": "🟢 Активен", "error": "🔴 Ошибка" }
+                widget_refs["status_label"].configure(text=status_text.get(status), text_color=status_colors.get(status))
+                if ns_servers:
+                    widget_refs["ns_label"].configure(text=", ".join(ns_servers))
+                widget_refs["frame"].update_idletasks()
+        
+        self.after(0, _update)
+
     def show_add_domain_dialog(self):
         dialog = ctk.CTkToplevel(self)
         dialog.title("Добавить домены")
@@ -437,14 +594,7 @@ class FastPanelApp(ctk.CTk):
             self.show_domain_tab()
 
         dialog.destroy()
-
-    def update_domain_server(self, index, server_ip):
-        ip_to_save = server_ip if server_ip != "(Не выбран)" else ""
-        self.domains[index]["server_ip"] = ip_to_save
-        self.save_domains()
-        self.log_action(f"Для домена {self.domains[index]['domain']} установлен сервер {server_ip}")
-        self.show_success(f"Сервер для домена обновлен")
-        
+    
     def show_result_tab(self):
         self.clear_tab_container()
         self.page_title.configure(text="Результаты установки")
@@ -466,9 +616,99 @@ class FastPanelApp(ctk.CTk):
 
     def show_settings_tab(self):
         self.clear_tab_container()
-        self.page_title.configure(text="Настройки")
+        self.page_title.configure(text="Настройки API")
         self.current_tab = "settings"
-        ctk.CTkLabel(self.tab_container, text="Вкладка настроек", font=("Arial", 24)).pack(pady=20)
+
+        tab_view = ctk.CTkTabview(self.tab_container, fg_color=("#ffffff", "#2b2b2b"))
+        tab_view.pack(fill="both", expand=True, padx=20, pady=10)
+
+        # Cloudflare Tab
+        cf_tab = tab_view.add("Cloudflare")
+        self._create_cloudflare_settings_tab(cf_tab)
+
+        # Namecheap Tab
+        nc_tab = tab_view.add("Namecheap")
+        self._create_namecheap_settings_tab(nc_tab)
+
+    def _create_cloudflare_settings_tab(self, parent):
+        ctk.CTkLabel(parent, text="Настройки Cloudflare API", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(20, 10))
+        
+        self.cf_token_entry = self._create_setting_row(parent, "API Token:")
+        self.cf_token_entry.insert(0, self.credentials.get("cloudflare_token", ""))
+        self.cf_token_entry.configure(show="*")
+
+        self._create_save_cancel_buttons(parent, self.save_settings)
+        
+
+    def _create_namecheap_settings_tab(self, parent):
+        ctk.CTkLabel(parent, text="Настройки Namecheap API", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(20, 10))
+
+        self.nc_user_entry = self._create_setting_row(parent, "API User:")
+        self.nc_user_entry.insert(0, self.credentials.get("namecheap_user", ""))
+        
+        self.nc_key_entry = self._create_setting_row(parent, "API Key:")
+        self.nc_key_entry.insert(0, self.credentials.get("namecheap_key", ""))
+        self.nc_key_entry.configure(show="*")
+
+        ip_frame = self._create_setting_row(parent, "Whitelist IP:", return_frame=True)
+        self.nc_ip_entry = ctk.CTkEntry(ip_frame, width=250)
+        self.nc_ip_entry.pack(side="left")
+        self.nc_ip_entry.insert(0, self.credentials.get("namecheap_ip", ""))
+        ctk.CTkButton(ip_frame, text="Получить мой IP", width=120, command=self.fetch_public_ip).pack(side="left", padx=10)
+
+        self._create_save_cancel_buttons(parent, self.save_settings)
+
+
+    def _create_setting_row(self, parent, label_text, return_frame=False):
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=20, pady=10, expand=True)
+        
+        label = ctk.CTkLabel(row, text=label_text, width=120, anchor="w")
+        label.pack(side="left")
+
+        if return_frame:
+            content_frame = ctk.CTkFrame(row, fg_color="transparent")
+            content_frame.pack(side="left", fill="x", expand=True)
+            return content_frame
+
+        entry = ctk.CTkEntry(row, width=350)
+        entry.pack(side="left", fill="x", expand=True)
+        return entry
+
+    def _create_save_cancel_buttons(self, parent, save_command):
+        buttons_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        buttons_frame.pack(pady=20, padx=20, fill="x")
+        
+        ctk.CTkButton(buttons_frame, text="Сохранить", width=120, command=save_command).pack(side="right")
+        ctk.CTkButton(buttons_frame, text="Отмена", width=120, fg_color="transparent", border_width=1, command=self.show_servers_tab).pack(side="right", padx=10)
+
+
+    def fetch_public_ip(self):
+        self.nc_ip_entry.delete(0, "end")
+        self.nc_ip_entry.insert(0, "Получение...")
+        threading.Thread(target=self._get_ip_thread, daemon=True).start()
+
+    def _get_ip_thread(self):
+        ip = NamecheapService.get_public_ip()
+        self.after(0, lambda: (self.nc_ip_entry.delete(0, "end"), self.nc_ip_entry.insert(0, ip)))
+
+    def save_settings(self):
+        self.credentials["cloudflare_token"] = self.cf_token_entry.get()
+        self.credentials["namecheap_user"] = self.nc_user_entry.get()
+        self.credentials["namecheap_key"] = self.nc_key_entry.get()
+        self.credentials["namecheap_ip"] = self.nc_ip_entry.get()
+        self.save_credentials()
+        self.show_success("Настройки сохранены")
+
+    def load_credentials(self):
+        try:
+            with open("data/credentials.json", 'r', encoding='utf-8') as f: self.credentials = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            self.credentials = {}
+
+    def save_credentials(self):
+        os.makedirs("data", exist_ok=True)
+        with open("data/credentials.json", 'w', encoding='utf-8') as f: json.dump(self.credentials, f, indent=2)
 
     def show_monitoring_tab(self):
         self.clear_tab_container()
