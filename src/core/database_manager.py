@@ -25,6 +25,8 @@ class DatabaseManager:
         self.cursor = self.conn.cursor()
         self._create_tables()
 
+        # Проверяем, существует ли файл fastpanel.db и не пустой ли он
+        # Если нет - запускаем миграцию
         if not db_path.exists() or db_path.stat().st_size == 0:
             self._migrate_from_json()
 
@@ -47,7 +49,7 @@ class DatabaseManager:
             )
             """)
 
-            # Таблица доменов
+            # Таблица доменов (с новыми полями)
             self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS domains (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,6 +59,9 @@ class DatabaseManager:
                 ftp_password TEXT,
                 cloudflare_status TEXT,
                 cloudflare_ns TEXT,
+                site_user TEXT,
+                path TEXT,
+                ssl_status TEXT,
                 FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE SET NULL
             )
             """)
@@ -144,20 +149,18 @@ class DatabaseManager:
     def add_server(self, server_data: Dict[str, Any]) -> bool:
         """Добавляет новый сервер в БД."""
         try:
+            # Убедимся, что все поля существуют, иначе None
+            keys = ['id', 'name', 'ip', 'ssh_user', 'password', 'fastpanel_installed', 'admin_url', 'admin_password', 'created_at']
+            for key in keys:
+                server_data.setdefault(key, None)
+            
+            # Конвертируем bool в int для fastpanel_installed
+            server_data['fastpanel_installed'] = 1 if server_data.get('fastpanel_installed') else 0
+
             self.cursor.execute("""
                 INSERT INTO servers (id, name, ip, ssh_user, password, fastpanel_installed, admin_url, admin_password, created_at)
                 VALUES (:id, :name, :ip, :ssh_user, :password, :fastpanel_installed, :admin_url, :admin_password, :created_at)
-            """, {
-                'id': server_data.get('id'),
-                'name': server_data.get('name'),
-                'ip': server_data.get('ip'),
-                'ssh_user': server_data.get('ssh_user', 'root'),
-                'password': server_data.get('password'),
-                'fastpanel_installed': 1 if server_data.get('fastpanel_installed') else 0,
-                'admin_url': server_data.get('admin_url'),
-                'admin_password': server_data.get('admin_password'),
-                'created_at': server_data.get('created_at')
-            })
+            """, server_data)
             self.conn.commit()
             return True
         except sqlite3.IntegrityError:
@@ -200,17 +203,18 @@ class DatabaseManager:
     def add_domain(self, domain_data: Dict[str, Any]) -> bool:
         """Добавляет новый домен."""
         try:
+            # Убедимся, что все поля существуют, иначе None
+            keys = ['domain_name', 'server_id', 'ftp_user', 'ftp_password', 'cloudflare_status', 'cloudflare_ns']
+            for key in keys:
+                domain_data.setdefault(key, None)
+
+            if isinstance(domain_data.get('cloudflare_ns'), list):
+                 domain_data['cloudflare_ns'] = ",".join(domain_data.get('cloudflare_ns'))
+
             self.cursor.execute("""
                 INSERT INTO domains (domain_name, server_id, ftp_user, ftp_password, cloudflare_status, cloudflare_ns)
                 VALUES (:domain_name, :server_id, :ftp_user, :ftp_password, :cloudflare_status, :cloudflare_ns)
-            """, {
-                'domain_name': domain_data.get('domain_name'),
-                'server_id': domain_data.get('server_id'),
-                'ftp_user': domain_data.get('ftp_user'),
-                'ftp_password': domain_data.get('ftp_password'),
-                'cloudflare_status': domain_data.get('cloudflare_status'),
-                'cloudflare_ns': ",".join(domain_data.get('cloudflare_ns', []))
-            })
+            """, domain_data)
             self.conn.commit()
             return True
         except sqlite3.IntegrityError:
