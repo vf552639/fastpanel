@@ -25,6 +25,40 @@ from src.services.namecheap_service import NamecheapService
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
+class AutomationProgressWindow(ctk.CTkToplevel):
+    """Окно для отображения прогресса и логов автоматизации."""
+    def __init__(self, parent, server_name, total_domains):
+        super().__init__(parent)
+        self.title(f"Автоматизация: {server_name}")
+        self.geometry("800x600")
+        self.transient(parent)
+
+        self.progress = 0
+        self.total = total_domains
+
+        self.progress_label = ctk.CTkLabel(self, text="Запуск...")
+        self.progress_label.pack(pady=10, padx=20, fill="x")
+
+        self.progress_bar = ctk.CTkProgressBar(self)
+        self.progress_bar.set(0)
+        self.progress_bar.pack(pady=10, padx=20, fill="x")
+
+        self.log_textbox = ctk.CTkTextbox(self, wrap="word", state="disabled", font=("Courier", 12))
+        self.log_textbox.pack(pady=10, padx=20, fill="both", expand=True)
+
+    def add_log(self, message):
+        self.log_textbox.configure(state="normal")
+        self.log_textbox.insert("end", message + "\n")
+        self.log_textbox.see("end")
+        self.log_textbox.configure(state="disabled")
+
+    def increment_progress(self):
+        self.progress += 1
+        progress_value = self.progress / self.total if self.total > 0 else 0
+        self.progress_bar.set(progress_value)
+        self.progress_label.configure(text=f"Обработано {self.progress} из {self.total} доменов")
+
+
 class ServerCard(ctk.CTkFrame):
     """Карточка сервера для отображения в списке"""
 
@@ -76,7 +110,7 @@ class ServerCard(ctk.CTkFrame):
         
         app = self.winfo_toplevel()
         server_has_domains = any(d.get("server_ip") == self.server_data.get("ip") for d in app.domains)
-        if not server_has_domains:
+        if not server_has_domains or not self.server_data.get("fastpanel_installed"):
             automation_btn.configure(state="disabled")
 
 
@@ -398,14 +432,20 @@ class FastPanelApp(ctk.CTk):
         self.bind_cf_button = ctk.CTkButton(action_panel, text="🔗 Привязать к Cloudflare", state="disabled", command=self.start_cloudflare_binding)
         self.bind_cf_button.pack(side="left", padx=10)
 
-
         # Header for the list
         header_frame = ctk.CTkFrame(self.tab_container, fg_color=("#e0e0e0", "#333333"), height=30)
         header_frame.pack(fill="x", pady=5)
-        ctk.CTkLabel(header_frame, text="Домен", width=250, anchor="w").pack(side="left", padx=50)
-        ctk.CTkLabel(header_frame, text="Сервер", width=150, anchor="w").pack(side="left", padx=10)
-        ctk.CTkLabel(header_frame, text="Статус Cloudflare", width=150, anchor="w").pack(side="left", padx=10)
-        ctk.CTkLabel(header_frame, text="NS-серверы Cloudflare", anchor="w").pack(side="left", padx=10, fill="x", expand=True)
+        header_frame.grid_columnconfigure(0, weight=0, minsize=40)   # Checkbox
+        header_frame.grid_columnconfigure(1, weight=3)              # Domain
+        header_frame.grid_columnconfigure(2, weight=2, minsize=180) # Server
+        header_frame.grid_columnconfigure(3, weight=2, minsize=160) # CF Status
+        header_frame.grid_columnconfigure(4, weight=4)              # NS
+
+        ctk.CTkLabel(header_frame, text="Домен", anchor="w").grid(row=0, column=1, padx=10, sticky="w")
+        ctk.CTkLabel(header_frame, text="Сервер", anchor="w").grid(row=0, column=2, padx=10, sticky="w")
+        ctk.CTkLabel(header_frame, text="Статус Cloudflare", anchor="w").grid(row=0, column=3, padx=10, sticky="w")
+        ctk.CTkLabel(header_frame, text="NS-серверы Cloudflare", anchor="w").grid(row=0, column=4, padx=10, sticky="w")
+
 
         domain_list_frame = ctk.CTkScrollableFrame(self.tab_container, fg_color="transparent")
         domain_list_frame.pack(fill="both", expand=True)
@@ -419,33 +459,38 @@ class FastPanelApp(ctk.CTk):
     def add_domain_row(self, parent, domain_info):
         domain = domain_info["domain"]
         domain_frame = ctk.CTkFrame(parent, fg_color=("#ffffff", "#2b2b2b"), corner_radius=0, border_width=1, border_color=("#e0e0e0", "#404040"))
-        domain_frame.pack(fill="x", pady=2)
+        domain_frame.pack(fill="x", pady=2, ipady=5)
+        domain_frame.grid_columnconfigure(0, weight=0, minsize=40)
+        domain_frame.grid_columnconfigure(1, weight=3)
+        domain_frame.grid_columnconfigure(2, weight=2, minsize=180)
+        domain_frame.grid_columnconfigure(3, weight=2, minsize=160)
+        domain_frame.grid_columnconfigure(4, weight=4)
 
         # Checkbox
         var = ctk.BooleanVar()
         checkbox = ctk.CTkCheckBox(domain_frame, text="", variable=var, command=lambda d=domain: self.toggle_domain_selection(d, var))
-        checkbox.pack(side="left", padx=10)
+        checkbox.grid(row=0, column=0, padx=10, sticky="w")
 
         # Domain Label
-        ctk.CTkLabel(domain_frame, text=f"🌐 {domain}", font=ctk.CTkFont(size=14), width=250, anchor="w").pack(side="left", padx=10)
+        ctk.CTkLabel(domain_frame, text=f"🌐 {domain}", font=ctk.CTkFont(size=14), anchor="w").grid(row=0, column=1, padx=10, sticky="w")
 
         # Server Dropdown
         server_ips = ["(Не выбран)"] + [s['ip'] for s in self.servers if s.get('ip')]
         server_var = ctk.StringVar(value=domain_info.get("server_ip") or "(Не выбран)")
         server_menu = ctk.CTkOptionMenu(domain_frame, values=server_ips, variable=server_var, width=150, command=lambda ip, d=domain: self.update_domain_server(d, ip))
-        server_menu.pack(side="left", padx=10)
+        server_menu.grid(row=0, column=2, padx=10, sticky="w")
 
         # Cloudflare Status
         status_colors = { "none": ("#666666", "#aaaaaa"), "pending": ("#ff9800", "#f57c00"), "active": ("#4caf50", "#2e7d32"), "error": ("#f44336", "#d32f2f") }
         status_text = { "none": "⚪ Не привязан", "pending": "🟡 В процессе...", "active": "🟢 Активен", "error": "🔴 Ошибка" }
         status = domain_info.get("cloudflare_status", "none")
-        status_label = ctk.CTkLabel(domain_frame, text=status_text.get(status), text_color=status_colors.get(status), width=150, anchor="w")
-        status_label.pack(side="left", padx=10)
+        status_label = ctk.CTkLabel(domain_frame, text=status_text.get(status), text_color=status_colors.get(status), anchor="w")
+        status_label.grid(row=0, column=3, padx=10, sticky="w")
 
         # NS Servers
         ns_servers = ", ".join(domain_info.get("cloudflare_ns", []))
-        ns_label = ctk.CTkLabel(domain_frame, text=ns_servers, anchor="w")
-        ns_label.pack(side="left", padx=10, fill="x", expand=True)
+        ns_label = ctk.CTkLabel(domain_frame, text=ns_servers, anchor="w", wraplength=300, justify="left")
+        ns_label.grid(row=0, column=4, padx=10, sticky="ew")
 
         self.domain_widgets[domain] = {"frame": domain_frame, "status_label": status_label, "ns_label": ns_label}
 
@@ -623,13 +668,14 @@ class FastPanelApp(ctk.CTk):
         tab_view = ctk.CTkTabview(self.tab_container, fg_color=("#ffffff", "#2b2b2b"))
         tab_view.pack(fill="both", expand=True, padx=20, pady=10)
 
-        # Cloudflare Tab
         cf_tab = tab_view.add("Cloudflare")
         self._create_cloudflare_settings_tab(cf_tab)
 
-        # Namecheap Tab
         nc_tab = tab_view.add("Namecheap")
         self._create_namecheap_settings_tab(nc_tab)
+        
+        fp_tab = tab_view.add("FastPanel")
+        self._create_fastpanel_settings_tab(fp_tab)
 
     def _create_cloudflare_settings_tab(self, parent):
         ctk.CTkLabel(parent, text="Настройки Cloudflare API", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(20, 10))
@@ -640,7 +686,6 @@ class FastPanelApp(ctk.CTk):
 
         self._create_save_cancel_buttons(parent, self.save_settings)
         
-
     def _create_namecheap_settings_tab(self, parent):
         ctk.CTkLabel(parent, text="Настройки Namecheap API", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(20, 10))
 
@@ -659,12 +704,20 @@ class FastPanelApp(ctk.CTk):
 
         self._create_save_cancel_buttons(parent, self.save_settings)
 
+    def _create_fastpanel_settings_tab(self, parent):
+        ctk.CTkLabel(parent, text="Настройки FastPanel", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(20, 10))
+        
+        self.fp_path_entry = self._create_setting_row(parent, "Путь к утилите FastPanel:")
+        self.fp_path_entry.insert(0, self.credentials.get("fastpanel_path", ""))
+        
+        self._create_save_cancel_buttons(parent, self.save_settings)
+
 
     def _create_setting_row(self, parent, label_text, return_frame=False):
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=20, pady=10, expand=True)
         
-        label = ctk.CTkLabel(row, text=label_text, width=120, anchor="w")
+        label = ctk.CTkLabel(row, text=label_text, width=180, anchor="w")
         label.pack(side="left")
 
         if return_frame:
@@ -698,6 +751,7 @@ class FastPanelApp(ctk.CTk):
         self.credentials["namecheap_user"] = self.nc_user_entry.get()
         self.credentials["namecheap_key"] = self.nc_key_entry.get()
         self.credentials["namecheap_ip"] = self.nc_ip_entry.get()
+        self.credentials["fastpanel_path"] = self.fp_path_entry.get()
         self.save_credentials()
         self.show_success("Настройки сохранены")
 
@@ -1151,8 +1205,65 @@ class FastPanelApp(ctk.CTk):
         self.after(3000, lambda: self.status_label.configure(text="● Готов к работе", text_color=("#4caf50", "#4caf50")))
         
     def start_automation(self, server_data):
-        self.log_action(f"Запуск автоматизации для сервера '{server_data['name']}'", level="SUCCESS")
-        self.show_success(f"Автоматизация для '{server_data['name']}' запущена")
+        self.log_action(f"Запуск автоматизации для сервера '{server_data['name']}'")
+        self.show_success(f"Автоматизация для '{server_data['name']}' запущена...")
+
+        server_domains = [d for d in self.domains if d.get("server_ip") == server_data.get("ip")]
+        if not server_domains:
+            self.log_action(f"На сервере '{server_data['name']}' нет привязанных доменов.", level="WARNING")
+            self.show_error("Нет доменов для автоматизации")
+            return
+
+        progress_window = AutomationProgressWindow(self, server_data['name'], len(server_domains))
+
+        automation_thread = threading.Thread(
+            target=self._run_automation_in_thread,
+            args=(server_data, server_domains, progress_window),
+            daemon=True
+        )
+        automation_thread.start()
+
+    def _run_automation_in_thread(self, server_data, domains_to_process, progress_window):
+        """Обертка для запуска автоматизации в фоновом потоке."""
+        
+        def progress_callback(message):
+            self.after(0, progress_window.add_log, message)
+            self.log_action(message)
+
+        progress_callback(f"Всего доменов для автоматизации: {len(domains_to_process)}")
+        
+        service = FastPanelService(fastpanel_path=self.credentials.get("fastpanel_path"))
+
+        # Устанавливаем одно SSH-соединение на всю сессию
+        if not service.ssh.connect(server_data['ip'], server_data.get('ssh_user', 'root'), server_data.get('password')):
+            progress_callback(f"КРИТИЧЕСКАЯ ОШИБКА: Не удалось подключиться к серверу {server_data['ip']}.")
+            self.log_action(f"SSH-соединение не установлено для {server_data['name']}", "ERROR")
+            self.after(0, progress_window.destroy)
+            return
+        
+        progress_callback("SSH-соединение успешно установлено.")
+
+        for domain_info in domains_to_process:
+            progress_callback(f"--- Начало работы с доменом: {domain_info['domain']} ---")
+            
+            updated_data = service.run_domain_automation(domain_info, server_data, progress_callback)
+            
+            self.after(0, self._update_domain_data, updated_data)
+            self.after(0, progress_window.increment_progress)
+
+        service.ssh.disconnect()
+        progress_callback("--- Автоматизация завершена ---")
+        self.log_action(f"Автоматизация для сервера '{server_data['name']}' завершена.", "SUCCESS")
+        self.after(5000, progress_window.destroy)
+
+
+    def _update_domain_data(self, updated_domain_info):
+        """Обновляет информацию о домене и сохраняет в файл."""
+        for i, d in enumerate(self.domains):
+            if d['domain'] == updated_domain_info['domain']:
+                self.domains[i] = updated_domain_info
+                break
+        self.save_domains()
 
 
 if __name__ == "__main__":
