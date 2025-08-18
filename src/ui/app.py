@@ -2,7 +2,6 @@
 FastPanel Automation GUI
 Современный интерфейс для управления серверами и FastPanel
 """
-
 import customtkinter as ctk
 from typing import Optional, Dict, List
 import json
@@ -19,6 +18,7 @@ from src.core.ssh_manager import SSHManager
 from functools import partial
 from src.services.cloudflare_service import CloudflareService
 from src.services.namecheap_service import NamecheapService
+from src.core.database_manager import DatabaseManager
 
 
 # Настройка внешнего вида
@@ -109,7 +109,7 @@ class ServerCard(ctk.CTkFrame):
         automation_btn.pack(side="right", padx=(10,0))
         
         app = self.winfo_toplevel()
-        server_has_domains = any(d.get("server_ip") == self.server_data.get("ip") for d in app.domains)
+        server_has_domains = any(d.get("server_id") == self.server_data.get("id") for d in app.domains)
         if not server_has_domains or not self.server_data.get("fastpanel_installed"):
             automation_btn.configure(state="disabled")
 
@@ -145,15 +145,12 @@ class ServerCard(ctk.CTkFrame):
     def set_install_mode(self, installing=True):
         if installing:
             self.install_btn.pack_forget()
-            self.manage_btn.pack_forget() if hasattr(self, 'manage_btn') else None
-            self.panel_btn.pack_forget() if hasattr(self, 'panel_btn') else None
+            if hasattr(self, 'manage_btn'): self.manage_btn.pack_forget()
+            if hasattr(self, 'panel_btn'): self.panel_btn.pack_forget()
             
             self.install_progress.pack(side="left", fill="x", expand=True, padx=(0,10))
             self.log_button.pack(side="left")
-        else:
-            self.install_progress.pack_forget()
-            self.log_button.pack_forget()
-            self._update_server_list() # Redraw the card
+        # No 'else' needed as the whole UI will be redrawn
 
     def check_installation_status(self):
         server_id = self.server_data.get("id")
@@ -188,28 +185,34 @@ class FastPanelApp(ctk.CTk):
         self.geometry("1200x700")
         self.minsize(1000, 600)
         self.center_window()
+        
+        self.db = DatabaseManager()
 
         self.servers = []
         self.domains = []
         self.logs = []
         self.current_tab = "servers"
-        self.installation_states = {} # For tracking background installations
-        self.domain_widgets = {} # To store references to domain widgets
+        self.installation_states = {}
+        self.domain_widgets = {}
         self.selected_domains = set()
         
-        self.load_app_settings()
-        self.load_credentials()
+        self.app_settings = {}
+        self.credentials = {}
+        
+        self.load_data_from_db()
 
         self.log_action("Приложение запущено")
-
         self._create_widgets()
-        self.load_servers()
-        self.load_domains()
-        
         self.after(100, self._update_server_list) 
 
         if sys.platform == "darwin" and os.path.exists("assets/icon.icns"):
             self.iconbitmap("assets/icon.icns")
+            
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    def on_closing(self):
+        self.db.close()
+        self.destroy()
 
     def center_window(self):
         self.update_idletasks()
@@ -221,17 +224,12 @@ class FastPanelApp(ctk.CTk):
     def _create_widgets(self):
         main_container = ctk.CTkFrame(self, fg_color="transparent")
         main_container.pack(fill="both", expand=True)
-
         self._create_sidebar(main_container)
-
         self.content_frame = ctk.CTkFrame(main_container, fg_color=("#f5f5f5", "#1a1a1a"), corner_radius=0)
         self.content_frame.pack(side="right", fill="both", expand=True)
-
         self._create_header()
-
         self.tab_container = ctk.CTkFrame(self.content_frame, fg_color="transparent")
         self.tab_container.pack(fill="both", expand=True, padx=20, pady=(0, 20))
-
         self.show_servers_tab()
 
     def _create_sidebar(self, parent):
@@ -270,12 +268,9 @@ class FastPanelApp(ctk.CTk):
         header_frame = ctk.CTkFrame(self.content_frame, height=80, fg_color="transparent")
         header_frame.pack(fill="x", padx=20, pady=(20, 10))
         header_frame.pack_propagate(False)
-
         self.page_title = ctk.CTkLabel(header_frame, text="Управление серверами", font=ctk.CTkFont(size=28, weight="bold"))
         self.page_title.pack(side="left")
-
         ctk.CTkButton(header_frame, text="🔄 Обновить", width=100, height=32, font=ctk.CTkFont(size=12), fg_color=("#2196f3", "#1976d2"), hover_color=("#1976d2", "#1565c0"), command=self.refresh_data).pack(side="right", padx=(10, 0))
-        
         self.search_entry = ctk.CTkEntry(header_frame, placeholder_text="🔍 Поиск серверов...", width=250, height=32, font=ctk.CTkFont(size=12))
         self.search_entry.pack(side="right", padx=10)
         self.search_entry.bind("<KeyRelease>", self._update_server_list)
@@ -284,14 +279,11 @@ class FastPanelApp(ctk.CTk):
         self.clear_tab_container()
         self.page_title.configure(text="Управление серверами")
         self.current_tab = "servers"
-
         top_panel = ctk.CTkFrame(self.tab_container, fg_color="transparent")
         top_panel.pack(fill="x", pady=(0, 10))
         ctk.CTkButton(top_panel, text="➕ Добавить сервер", font=ctk.CTkFont(size=14, weight="bold"), width=200, height=40, command=self.show_add_server_tab, fg_color="#2196f3", hover_color="#1976d2").pack(side="left")
-
         self.scrollable_servers = ctk.CTkScrollableFrame(self.tab_container, fg_color="transparent")
         self.scrollable_servers.pack(fill="both", expand=True)
-
         self._update_server_list()
 
     def _update_server_list(self, event=None):
@@ -313,11 +305,117 @@ class FastPanelApp(ctk.CTk):
             for server in filtered_servers:
                 card = ServerCard(self.scrollable_servers, server, on_click=self.handle_server_action)
                 card.pack(fill="x", pady=5)
-                # Store reference to the card for updates
                 server_id = server.get("id")
                 if server_id and server_id in self.installation_states:
                     self.installation_states[server_id]['card'] = card
 
+    def add_or_update_server(self, server_type, server_data=None):
+        is_editing = server_data is not None
+        
+        if server_type == 'new':
+            payload = {
+                "name": self.server_name_entry.get(),
+                "ip": self.server_ip_entry.get(),
+                "ssh_user": self.server_user_entry.get() or "root",
+                "password": self.server_password_entry.get(),
+            }
+            if not payload["name"] or not payload["ip"]:
+                self.show_error("Имя и IP обязательны")
+                return
+        else: # existing
+            payload = {
+                "name": self.existing_server_name_entry.get(),
+                "admin_url": self.server_url_entry.get(),
+                "admin_password": self.fastuser_password_entry.get(),
+            }
+            if not payload["admin_url"] or not payload["admin_password"]:
+                self.show_error("URL и пароль обязательны")
+                return
+            try:
+                payload["ip"] = payload["admin_url"].split("://")[1].split(":")[0]
+            except:
+                self.show_error("Неверный формат URL")
+                return
+            if not payload["name"]: payload["name"] = payload["ip"]
+
+        if is_editing:
+            self.db.update_server(server_data['id'], payload)
+            self.log_action(f"Сервер '{payload['name']}' обновлен")
+            self.show_success(f"Сервер {payload['name']} обновлен")
+        else:
+            payload.update({
+                "id": str(uuid.uuid4())[:8],
+                "fastpanel_installed": server_type == "existing",
+                "created_at": datetime.now().isoformat(),
+            })
+            if self.db.add_server(payload):
+                self.log_action(f"Добавлен новый сервер: '{payload['name']}'")
+                self.show_success(f"Сервер {payload['name']} добавлен")
+            else:
+                self.show_error(f"Сервер с IP {payload['ip']} уже существует!")
+                return
+
+        self.refresh_data()
+        self.show_servers_tab()
+        
+    def delete_server(self, server_data, dialog):
+        server_id = server_data["id"]
+        self.db.delete_server(server_id)
+        
+        # Обновляем локальный список
+        self.servers = [s for s in self.servers if s["id"] != server_id]
+        
+        dialog.destroy()
+        self.log_action(f"Сервер '{server_data['name']}' удален", level="WARNING")
+        self.show_success(f"Сервер {server_data['name']} удален")
+        
+        # Перерисовываем UI
+        self._update_server_list()
+        
+    def _on_installation_finished(self, result, server_data, server_id):
+        if server_id in self.installation_states:
+            self.installation_states[server_id]["installing"] = False
+        
+        if result['success']:
+            self.show_success(f"FastPanel на '{server_data['name']}' успешно установлен!")
+            self.log_action(f"Установка FastPanel на '{server_data['name']}' завершена успешно", level="SUCCESS")
+
+            update_data = {
+                "fastpanel_installed": True,
+                "admin_url": result['admin_url'],
+                "admin_password": result['admin_password'],
+                "install_date": result['install_time']
+            }
+            
+            # 1. Обновляем БД
+            self.db.update_server(server_id, update_data)
+            
+            # 2. Обновляем локальный кэш
+            for i, s in enumerate(self.servers):
+                if s['id'] == server_id:
+                    self.servers[i].update(update_data)
+                    break
+            
+        else:
+            error_message = result.get('error', 'Неизвестная ошибка')
+            self.show_error("Ошибка установки!")
+            self.log_action(f"Ошибка установки на '{server_data['name']}': {error_message}", level="ERROR")
+        
+        # 3. Перерисовываем интерфейс с обновленными данными
+        self._update_server_list()
+
+    def refresh_data(self):
+        self.load_data_from_db()
+        
+        if self.current_tab == "servers":
+            self.show_servers_tab()
+        elif self.current_tab == "domain":
+            self.show_domain_tab()
+        
+        self.log_action("Данные обновлены")
+        self.show_success("Данные обновлены")
+        
+    # --- Остальные методы (без изменений) ---
 
     def show_add_server_tab(self, server_data=None):
         self.clear_tab_container()
@@ -371,7 +469,6 @@ class FastPanelApp(ctk.CTk):
         ctk.CTkButton(self.buttons_frame, text="Отмена", width=120, height=40, fg_color="transparent", border_width=1, text_color=("#000000", "#ffffff"), border_color=("#e0e0e0", "#404040"), hover_color=("#f0f0f0", "#333333"), command=self.show_servers_tab).pack(side="left", padx=5)
         ctk.CTkButton(self.buttons_frame, text="Сохранить", width=150, height=40, font=ctk.CTkFont(size=13, weight="bold"), command=lambda: self.add_or_update_server(server_type, server_data)).pack(side="left", padx=5)
 
-
     def create_new_server_form(self, parent, data=None):
         ctk.CTkLabel(parent, text="Название сервера", font=ctk.CTkFont(size=12), anchor="w").pack(fill="x", pady=(0, 5))
         self.server_name_entry = ctk.CTkEntry(parent, width=400, height=40)
@@ -393,11 +490,6 @@ class FastPanelApp(ctk.CTk):
         self.server_password_entry.pack(pady=(0, 15), fill="x", expand=True)
         if data: self.server_password_entry.insert(0, data.get("password", ""))
 
-        ctk.CTkLabel(parent, text="Дата окончания (YYYY-MM-DD)", font=ctk.CTkFont(size=12), anchor="w").pack(fill="x", pady=(0, 5))
-        self.server_expiration_entry = ctk.CTkEntry(parent, width=400, height=40)
-        self.server_expiration_entry.pack(pady=(0, 15), fill="x", expand=True)
-        if data: self.server_expiration_entry.insert(0, data.get("expiration_date") or "")
-
     def create_existing_server_form(self, parent, data=None):
         ctk.CTkLabel(parent, text="Имя сервера", font=ctk.CTkFont(size=12), anchor="w").pack(fill="x", pady=(0, 5))
         self.existing_server_name_entry = ctk.CTkEntry(parent, width=400, height=40)
@@ -413,11 +505,6 @@ class FastPanelApp(ctk.CTk):
         self.fastuser_password_entry = ctk.CTkEntry(parent, width=400, height=40, show="*")
         self.fastuser_password_entry.pack(pady=(0, 15), fill="x", expand=True)
         if data: self.fastuser_password_entry.insert(0, data.get("admin_password", ""))
-        
-        ctk.CTkLabel(parent, text="Дата окончания (YYYY-MM-DD)", font=ctk.CTkFont(size=12), anchor="w").pack(fill="x", pady=(0, 5))
-        self.existing_server_expiration_entry = ctk.CTkEntry(parent, width=400, height=40)
-        self.existing_server_expiration_entry.pack(pady=(0, 15), fill="x", expand=True)
-        if data: self.existing_server_expiration_entry.insert(0, data.get("expiration_date") or "")
 
     def show_domain_tab(self):
         self.clear_tab_container()
@@ -436,12 +523,9 @@ class FastPanelApp(ctk.CTk):
         
         ctk.CTkButton(action_panel, text="✏️ Редактировать колонки", command=self.show_edit_columns_dialog).pack(side="left", padx=10)
 
-
-        # Header for the list
         self.domain_header = ctk.CTkFrame(self.tab_container, fg_color=("#e0e0e0", "#333333"), height=30)
         self.domain_header.pack(fill="x", pady=5)
         self.update_domain_columns()
-
 
         domain_list_frame = ctk.CTkScrollableFrame(self.tab_container, fg_color="transparent")
         domain_list_frame.pack(fill="both", expand=True)
@@ -453,23 +537,19 @@ class FastPanelApp(ctk.CTk):
                 self.add_domain_row(domain_list_frame, domain_info)
                 
     def update_domain_columns(self):
-        # Clear existing header
         for widget in self.domain_header.winfo_children():
             widget.destroy()
 
-        # Define all possible columns
         self.all_columns = {
             "Домен": {"weight": 3, "min": 0, "visible": True, "anchor": "w"},
             "Сервер": {"weight": 2, "min": 180, "visible": True, "anchor": "w"},
             "Статус Cloudflare": {"weight": 2, "min": 160, "visible": True, "anchor": "w"},
-            "NS-серверы Cloudflare": {"weight": 4, "min": 0, "visible": self.app_settings['column_visibility'].get("NS-серверы Cloudflare", True), "anchor": "w"},
+            "NS-серверы Cloudflare": {"weight": 4, "min": 0, "visible": self.app_settings.get('column_visibility', {}).get("NS-серверы Cloudflare", True), "anchor": "w"},
             "FTP": {"weight": 1, "min": 80, "visible": True, "anchor": "center"}
         }
 
-        # Checkbox column
         self.domain_header.grid_columnconfigure(0, weight=0, minsize=40)
 
-        # Configure and show visible columns
         col_index = 1
         for name, props in self.all_columns.items():
             if props["visible"]:
@@ -490,7 +570,7 @@ class FastPanelApp(ctk.CTk):
         togglable_columns = ["NS-серверы Cloudflare"]
         
         for col_name in togglable_columns:
-            var = ctk.BooleanVar(value=self.app_settings['column_visibility'].get(col_name, True))
+            var = ctk.BooleanVar(value=self.app_settings.get('column_visibility', {}).get(col_name, True))
             cb = ctk.CTkCheckBox(dialog, text=col_name, variable=var, 
                                  command=lambda name=col_name, v=var: self.toggle_column_visibility(name, v))
             cb.pack(pady=5, padx=20, anchor="w")
@@ -499,12 +579,14 @@ class FastPanelApp(ctk.CTk):
 
     def toggle_column_visibility(self, column_name, var):
         is_visible = var.get()
+        if 'column_visibility' not in self.app_settings:
+            self.app_settings['column_visibility'] = {}
         self.app_settings['column_visibility'][column_name] = is_visible
-        self.save_app_settings()
+        self.db.save_setting('column_visibility', self.app_settings['column_visibility'])
         self.show_domain_tab() # Refresh the tab to show/hide columns
 
     def add_domain_row(self, parent, domain_info):
-        domain = domain_info["domain"]
+        domain = domain_info["domain_name"]
         domain_frame = ctk.CTkFrame(parent, fg_color=("#ffffff", "#2b2b2b"), corner_radius=0, border_width=1, border_color=("#e0e0e0", "#404040"))
         domain_frame.pack(fill="x", pady=2, ipady=5)
         
@@ -533,7 +615,15 @@ class FastPanelApp(ctk.CTk):
 
         # Server Dropdown
         server_ips = ["(Не выбран)"] + [s['ip'] for s in self.servers if s.get('ip')]
-        server_var = ctk.StringVar(value=domain_info.get("server_ip") or "(Не выбран)")
+        
+        # Находим server_id и по нему IP
+        server_ip_value = "(Не выбран)"
+        if domain_info.get("server_id"):
+            server = next((s for s in self.servers if s['id'] == domain_info.get("server_id")), None)
+            if server:
+                server_ip_value = server['ip']
+
+        server_var = ctk.StringVar(value=server_ip_value)
         server_menu = ctk.CTkOptionMenu(domain_frame, values=server_ips, variable=server_var, width=150, command=lambda ip, d=domain: self.update_domain_server(d, ip))
         server_menu.grid(row=0, column=current_col, padx=10, sticky="w")
         current_col += 1
@@ -548,7 +638,7 @@ class FastPanelApp(ctk.CTk):
 
         # NS Servers (if visible)
         if self.all_columns["NS-серверы Cloudflare"]["visible"]:
-            ns_servers = ", ".join(domain_info.get("cloudflare_ns", []))
+            ns_servers = domain_info.get("cloudflare_ns", "")
             ns_label = ctk.CTkLabel(domain_frame, text=ns_servers, anchor="w", wraplength=300, justify="left")
             ns_label.grid(row=0, column=current_col, padx=10, sticky="ew")
             current_col += 1
@@ -564,13 +654,19 @@ class FastPanelApp(ctk.CTk):
             self.domain_widgets[domain]["ns_label"] = ns_label
 
     def show_ftp_credentials_dialog(self, domain_info):
+        server_ip = "N/A"
+        if domain_info.get("server_id"):
+            server = next((s for s in self.servers if s['id'] == domain_info.get("server_id")), None)
+            if server:
+                server_ip = server['ip']
+
         dialog = ctk.CTkToplevel(self)
-        dialog.title(f"FTP: {domain_info['domain']}")
+        dialog.title(f"FTP: {domain_info['domain_name']}")
         dialog.geometry("450x250")
         dialog.transient(self)
         dialog.grab_set()
 
-        ctk.CTkLabel(dialog, text=f"FTP доступы для {domain_info['domain']}", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(20, 15))
+        ctk.CTkLabel(dialog, text=f"FTP доступы для {domain_info['domain_name']}", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(20, 15))
 
         def copy_to_clipboard(text_to_copy):
             self.clipboard_clear()
@@ -590,7 +686,7 @@ class FastPanelApp(ctk.CTk):
 
             ctk.CTkButton(row_frame, text="📋", width=30, command=lambda: copy_to_clipboard(value_text)).pack(side="left")
 
-        create_credential_row(dialog, "Хост:", domain_info.get("server_ip", "N/A"))
+        create_credential_row(dialog, "Хост:", server_ip)
         create_credential_row(dialog, "Логин:", domain_info.get("ftp_user", "N/A"))
         create_credential_row(dialog, "Пароль:", domain_info.get("ftp_password", "N/A"))
 
@@ -608,12 +704,17 @@ class FastPanelApp(ctk.CTk):
             self.bind_cf_button.configure(state="disabled")
 
     def update_domain_server(self, domain, server_ip):
-        ip_to_save = server_ip if server_ip != "(Не выбран)" else ""
+        server = next((s for s in self.servers if s['ip'] == server_ip), None)
+        server_id_to_save = server['id'] if server else None
+        
+        self.db.update_domain(domain, {"server_id": server_id_to_save})
+        
+        # Обновляем локальную копию
         for d in self.domains:
-            if d["domain"] == domain:
-                d["server_ip"] = ip_to_save
+            if d["domain_name"] == domain:
+                d["server_id"] = server_id_to_save
                 break
-        self.save_domains()
+                
         self.log_action(f"Для домена {domain} установлен сервер {server_ip}")
         self.show_success(f"Сервер для домена обновлен")
     
@@ -628,8 +729,8 @@ class FastPanelApp(ctk.CTk):
 
         # Validation of domain-server association
         for domain_name in self.selected_domains:
-            domain_info = next((d for d in self.domains if d["domain"] == domain_name), None)
-            if not domain_info or not domain_info.get("server_ip"):
+            domain_info = next((d for d in self.domains if d["domain_name"] == domain_name), None)
+            if not domain_info or not domain_info.get("server_id"):
                 self.show_error(f"Домен '{domain_name}' не ассоциирован с сервером.")
                 return
 
@@ -643,8 +744,13 @@ class FastPanelApp(ctk.CTk):
         self.log_action(f"Начата привязка домена {domain_name} к Cloudflare.")
         
         # Get domain info
-        domain_info = next((d for d in self.domains if d["domain"] == domain_name), None)
-        server_ip = domain_info["server_ip"]
+        domain_info = next((d for d in self.domains if d["domain_name"] == domain_name), None)
+        server = next((s for s in self.servers if s['id'] == domain_info['server_id']), None)
+        if not server:
+            self.log_action(f"Не найден сервер для домена {domain_name}.", "ERROR")
+            self.update_domain_status_ui(domain_name, "error")
+            return
+        server_ip = server["ip"]
         
         # Initialize services
         cf_service = CloudflareService(self.credentials.get("cloudflare_token"))
@@ -684,14 +790,19 @@ class FastPanelApp(ctk.CTk):
 
     def update_domain_status_ui(self, domain, status, ns_servers=None):
         def _update():
-            # Update data structure
+            # Update data structure in DB
+            update_data = {"cloudflare_status": status}
+            if ns_servers:
+                update_data["cloudflare_ns"] = ns_servers
+            self.db.update_domain(domain, update_data)
+            
+            # Update local data
             for d in self.domains:
-                if d["domain"] == domain:
+                if d["domain_name"] == domain:
                     d["cloudflare_status"] = status
                     if ns_servers:
-                        d["cloudflare_ns"] = ns_servers
+                        d["cloudflare_ns"] = ",".join(ns_servers)
                     break
-            self.save_domains()
             
             # Update UI
             if domain in self.domain_widgets:
@@ -728,16 +839,22 @@ class FastPanelApp(ctk.CTk):
 
     def add_domains(self, domains_text, server_ip, dialog):
         domains = [d.strip() for d in domains_text.split("\n") if d.strip()]
-        ip_to_save = server_ip if server_ip != "(Не выбран)" else ""
+        
+        server = next((s for s in self.servers if s['ip'] == server_ip), None)
+        server_id_to_save = server['id'] if server else None
+        
         added_count = 0
         for domain in domains:
-            if not any(d['domain'] == domain for d in self.domains):
-                self.domains.append({"domain": domain, "server_ip": ip_to_save})
+            domain_data = {
+                "domain": domain,
+                "server_ip": server_id_to_save
+            }
+            if self.db.add_domain(domain_data):
+                self.domains.append(self.db.get_all_domains()[-1]) # Reload to get ID
                 added_count += 1
         
         if added_count > 0:
             self.log_action(f"Добавлено {added_count} доменов")
-            self.save_domains()
             self.show_domain_tab()
 
         dialog.destroy()
@@ -853,40 +970,38 @@ class FastPanelApp(ctk.CTk):
         self.credentials["namecheap_key"] = self.nc_key_entry.get()
         self.credentials["namecheap_ip"] = self.nc_ip_entry.get()
         self.credentials["fastpanel_path"] = self.fp_path_entry.get()
-        self.save_credentials()
+        
+        for key, value in self.credentials.items():
+            self.db.save_setting(key, value)
+            
         self.show_success("Настройки сохранены")
 
-    def load_credentials(self):
-        try:
-            with open("data/credentials.json", 'r', encoding='utf-8') as f: self.credentials = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            self.credentials = {}
+    def load_data_from_db(self):
+        """Загружает все данные из БД в переменные приложения."""
+        self.servers = self.db.get_all_servers()
+        self.domains = self.db.get_all_domains()
+        
+        all_settings = self.db.get_all_settings()
+        
+        # Разделяем на credentials и app_settings
+        cred_keys = ["cloudflare_token", "namecheap_user", "namecheap_key", "namecheap_ip", "fastpanel_path"]
+        self.credentials = {k: v for k, v in all_settings.items() if k in cred_keys}
+        self.app_settings = {k: v for k, v in all_settings.items() if k not in cred_keys}
+
+        self.log_action(f"Загружено {len(self.servers)} серверов и {len(self.domains)} доменов из БД.")
+
 
     def save_credentials(self):
-        os.makedirs("data", exist_ok=True)
         self.credentials["cloudflare_token"] = self.cf_token_entry.get()
         self.credentials["namecheap_user"] = self.nc_user_entry.get()
         self.credentials["namecheap_key"] = self.nc_key_entry.get()
         self.credentials["namecheap_ip"] = self.nc_ip_entry.get()
         self.credentials["fastpanel_path"] = self.fp_path_entry.get()
-        with open("data/credentials.json", 'w', encoding='utf-8') as f: json.dump(self.credentials, f, indent=2)
-        self.show_success("Настройки сохранены")
         
-    def load_app_settings(self):
-        try:
-            with open("data/settings.json", 'r', encoding='utf-8') as f:
-                self.app_settings = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            self.app_settings = {
-                "column_visibility": {
-                    "NS-серверы Cloudflare": True
-                }
-            }
-
-    def save_app_settings(self):
-        os.makedirs("data", exist_ok=True)
-        with open("data/settings.json", 'w', encoding='utf-8') as f:
-            json.dump(self.app_settings, f, indent=2)
+        for key, value in self.credentials.items():
+            self.db.save_setting(key, value)
+            
+        self.show_success("Настройки сохранены")
 
 
     def show_monitoring_tab(self):
@@ -1046,7 +1161,7 @@ class FastPanelApp(ctk.CTk):
         sites_list_frame = ctk.CTkScrollableFrame(sites_frame, fg_color="transparent")
         sites_list_frame.pack(fill="both", expand=True)
 
-        server_domains = [d for d in self.domains if d.get("server_ip") == server_data.get("ip")]
+        server_domains = [d for d in self.domains if d.get("server_id") == server_data.get("id")]
 
         if not server_domains:
             ctk.CTkLabel(sites_list_frame, text="На этом сервере нет сайтов").pack(pady=20)
@@ -1057,7 +1172,7 @@ class FastPanelApp(ctk.CTk):
                 site_content = ctk.CTkFrame(site_card, fg_color="transparent")
                 site_content.pack(padx=15, pady=12, fill="x")
                 
-                ctk.CTkLabel(site_content, text=f"🌐 {domain_info['domain']}", font=ctk.CTkFont(size=14, weight="bold")).pack(side="left", anchor="w")
+                ctk.CTkLabel(site_content, text=f"🌐 {domain_info['domain_name']}", font=ctk.CTkFont(size=14, weight="bold")).pack(side="left", anchor="w")
                 
                 delete_button = ctk.CTkButton(site_content, text="🗑️", width=30, height=28, fg_color=("#f44336", "#d32f2f"), hover_color=("#da190b", "#b71c1c"), command=lambda d=domain_info: self.delete_domain_from_server(d, server_data))
                 delete_button.pack(side="right", anchor="e")
@@ -1136,10 +1251,7 @@ class FastPanelApp(ctk.CTk):
             if not payload["name"]: payload["name"] = payload["ip"]
 
         if is_editing:
-            for i, s in enumerate(self.servers):
-                if s['id'] == server_data['id']:
-                    self.servers[i].update(payload)
-                    break
+            self.db.update_server(server_data['id'], payload)
             self.log_action(f"Сервер '{payload['name']}' обновлен")
             self.show_success(f"Сервер {payload['name']} обновлен")
         else:
@@ -1148,31 +1260,44 @@ class FastPanelApp(ctk.CTk):
                 "fastpanel_installed": server_type == "existing",
                 "created_at": datetime.now().isoformat(),
             })
-            self.servers.append(payload)
-            self.log_action(f"Добавлен новый сервер: '{payload['name']}'")
-            self.show_success(f"Сервер {payload['name']} добавлен")
+            if self.db.add_server(payload):
+                self.log_action(f"Добавлен новый сервер: '{payload['name']}'")
+                self.show_success(f"Сервер {payload['name']} добавлен")
+            else:
+                self.show_error(f"Сервер с IP {payload['ip']} уже существует!")
+                return
 
-        self.save_servers()
+
+        self.refresh_data()
         self.show_servers_tab()
 
     def delete_server(self, server_data, dialog):
-        self.servers = [s for s in self.servers if s["id"] != server_data["id"]]
-        self.save_servers()
+        server_id = server_data["id"]
+        self.db.delete_server(server_id)
+        
+        # Удаляем из локального списка
+        self.servers = [s for s in self.servers if s["id"] != server_id]
+        
         dialog.destroy()
         self.log_action(f"Сервер '{server_data['name']}' удален", level="WARNING")
         self.show_success(f"Сервер {server_data['name']} удален")
-        self.show_servers_tab()
+        
+        # Перерисовываем UI
+        self._update_server_list()
+
 
     def delete_domain_from_server(self, domain, server_data):
-        self.domains = [d for d in self.domains if not (d['domain'] == domain['domain'] and d['server_ip'] == domain['server_ip'])]
-        self.save_domains()
-        self.log_action(f"Домен {domain['domain']} удален с сервера {server_data['name']}", level="WARNING")
-        self.show_success(f"Домен {domain['domain']} удален")
-        self.show_server_management(server_data)
+        self.db.delete_domain(domain['domain_name'])
+        self.log_action(f"Домен {domain['domain_name']} удален с сервера {server_data['name']}", level="WARNING")
+        self.show_success(f"Домен {domain['domain_name']} удален")
+        self.refresh_data()
+        # Возвращаемся к окну управления сервером
+        self.after(100, lambda: self.show_server_management(server_data))
+
 
     def start_installation(self, server_data):
         server_id = server_data.get("id")
-        if not server_id or server_id in self.installation_states and self.installation_states[server_id].get("installing"):
+        if not server_id or (server_id in self.installation_states and self.installation_states[server_id].get("installing")):
             self.show_error("Установка уже запущена")
             return
             
@@ -1203,7 +1328,9 @@ class FastPanelApp(ctk.CTk):
     def _run_installation_in_thread(self, server_data, password, server_id):
         def update_ui_callback(message, progress):
             def _update():
-                state = self.installation_states[server_id]
+                state = self.installation_states.get(server_id)
+                if not state: return
+                
                 state["log"].append(message)
                 state["progress"] = progress
                 
@@ -1227,29 +1354,37 @@ class FastPanelApp(ctk.CTk):
         self.after(0, self._on_installation_finished, result, server_data, server_id)
 
     def _on_installation_finished(self, result, server_data, server_id):
-        self.installation_states[server_id]["installing"] = False
+        if server_id in self.installation_states:
+            self.installation_states[server_id]["installing"] = False
         
         if result['success']:
             self.show_success(f"FastPanel на '{server_data['name']}' успешно установлен!")
             self.log_action(f"Установка FastPanel на '{server_data['name']}' завершена успешно", level="SUCCESS")
 
+            update_data = {
+                "fastpanel_installed": True,
+                "admin_url": result['admin_url'],
+                "admin_password": result['admin_password'],
+                "install_date": result['install_time']
+            }
+            
+            # 1. Обновляем БД
+            self.db.update_server(server_id, update_data)
+            
+            # 2. Обновляем локальный кэш
             for i, s in enumerate(self.servers):
-                if s['id'] == server_data['id']:
-                    self.servers[i].update({
-                        "fastpanel_installed": True,
-                        "admin_url": result['admin_url'],
-                        "admin_password": result['admin_password'],
-                        "install_date": result['install_time']
-                    })
+                if s['id'] == server_id:
+                    self.servers[i].update(update_data)
                     break
             
-            self.save_servers()
         else:
             error_message = result.get('error', 'Неизвестная ошибка')
             self.show_error("Ошибка установки!")
             self.log_action(f"Ошибка установки на '{server_data['name']}': {error_message}", level="ERROR")
         
-        self.refresh_data()
+        # 3. Перерисовываем интерфейс с обновленными данными
+        self._update_server_list()
+
 
     def show_log_window(self, server_data):
         server_id = server_data.get("id")
@@ -1285,31 +1420,15 @@ class FastPanelApp(ctk.CTk):
         log_window.protocol("WM_DELETE_WINDOW", on_close)
 
 
-    def load_servers(self):
-        try:
-            with open("data/servers.json", 'r', encoding='utf-8') as f: self.servers = json.load(f)
-            self.log_action(f"Загружено {len(self.servers)} серверов")
-        except (FileNotFoundError, json.JSONDecodeError): self.servers = []
-
-    def save_servers(self):
-        os.makedirs("data", exist_ok=True)
-        with open("data/servers.json", 'w', encoding='utf-8') as f: json.dump(self.servers, f, indent=2, ensure_ascii=False)
-
-    def load_domains(self):
-        try:
-            with open("data/domains.json", 'r', encoding='utf-8') as f: self.domains = json.load(f)
-            self.log_action(f"Загружено {len(self.domains)} доменов")
-        except (FileNotFoundError, json.JSONDecodeError): self.domains = []
-
-    def save_domains(self):
-        os.makedirs("data", exist_ok=True)
-        with open("data/domains.json", 'w', encoding='utf-8') as f: json.dump(self.domains, f, indent=2, ensure_ascii=False)
-
     def refresh_data(self):
-        self.load_servers()
-        self.load_domains()
-        if self.current_tab == "servers": self.show_servers_tab()
-        elif self.current_tab == "domain": self.show_domain_tab()
+        """Полностью перезагружает все данные из БД и обновляет текущую вкладку."""
+        self.load_data_from_db()
+        
+        if self.current_tab == "servers":
+            self.show_servers_tab()
+        elif self.current_tab == "domain":
+            self.show_domain_tab()
+        
         self.log_action("Данные обновлены")
         self.show_success("Данные обновлены")
         
@@ -1332,7 +1451,7 @@ class FastPanelApp(ctk.CTk):
         self.log_action(f"Запуск автоматизации для сервера '{server_data['name']}'")
         self.show_success(f"Автоматизация для '{server_data['name']}' запущена...")
 
-        server_domains = [d for d in self.domains if d.get("server_ip") == server_data.get("ip")]
+        server_domains = [d for d in self.domains if d.get("server_id") == server_data.get("id")]
         if not server_domains:
             self.log_action(f"На сервере '{server_data['name']}' нет привязанных доменов.", level="WARNING")
             self.show_error("Нет доменов для автоматизации")
@@ -1368,9 +1487,12 @@ class FastPanelApp(ctk.CTk):
         progress_callback("SSH-соединение успешно установлено.")
 
         for domain_info in domains_to_process:
-            progress_callback(f"--- Начало работы с доменом: {domain_info['domain']} ---")
+            progress_callback(f"--- Начало работы с доменом: {domain_info['domain_name']} ---")
             
-            updated_data = service.run_domain_automation(domain_info, server_data, progress_callback)
+            # Адаптируем domain_info для run_domain_automation
+            domain_info_adapted = {'domain': domain_info['domain_name']}
+            
+            updated_data = service.run_domain_automation(domain_info_adapted, server_data, progress_callback)
             
             self.after(0, self._update_domain_data, updated_data)
             self.after(0, progress_window.increment_progress)
@@ -1382,19 +1504,18 @@ class FastPanelApp(ctk.CTk):
 
 
     def _update_domain_data(self, updated_domain_info):
-        """Обновляет информацию о домене и сохраняет в файл."""
+        """Обновляет информацию о домене и сохраняет в БД."""
         domain_name = updated_domain_info.get("domain")
         if not domain_name:
             return
 
+        self.db.update_domain(domain_name, updated_domain_info)
+        
+        # Обновляем локальную копию
         for i, d in enumerate(self.domains):
-            if d.get('domain') == domain_name:
+            if d.get('domain_name') == domain_name:
                 self.domains[i].update(updated_domain_info)
                 break
-        else: # If domain not found, append it (though it should exist)
-            self.domains.append(updated_domain_info)
-            
-        self.save_domains()
         
         # Refresh domain tab if it's the current one
         if self.current_tab == "domain":
