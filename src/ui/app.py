@@ -196,7 +196,9 @@ class FastPanelApp(ctk.CTk):
         self.installation_states = {} # For tracking background installations
         self.domain_widgets = {} # To store references to domain widgets
         self.selected_domains = set()
-        self.load_credentials() # Load API credentials
+        
+        self.load_app_settings()
+        self.load_credentials()
 
         self.log_action("Приложение запущено")
 
@@ -260,7 +262,7 @@ class FastPanelApp(ctk.CTk):
 
         info_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         info_frame.pack(side="bottom", fill="x", padx=20, pady=20)
-        ctk.CTkLabel(info_frame, text="Version 0.2.3", font=ctk.CTkFont(size=10), text_color=("#999999", "#666666")).pack()
+        ctk.CTkLabel(info_frame, text="Version 0.3.0", font=ctk.CTkFont(size=10), text_color=("#999999", "#666666")).pack()
         self.status_label = ctk.CTkLabel(info_frame, text="● Готов к работе", font=ctk.CTkFont(size=11), text_color=("#4caf50", "#4caf50"))
         self.status_label.pack(pady=(5, 0))
 
@@ -431,20 +433,14 @@ class FastPanelApp(ctk.CTk):
 
         self.bind_cf_button = ctk.CTkButton(action_panel, text="🔗 Привязать к Cloudflare", state="disabled", command=self.start_cloudflare_binding)
         self.bind_cf_button.pack(side="left", padx=10)
+        
+        ctk.CTkButton(action_panel, text="✏️ Редактировать колонки", command=self.show_edit_columns_dialog).pack(side="left", padx=10)
+
 
         # Header for the list
-        header_frame = ctk.CTkFrame(self.tab_container, fg_color=("#e0e0e0", "#333333"), height=30)
-        header_frame.pack(fill="x", pady=5)
-        header_frame.grid_columnconfigure(0, weight=0, minsize=40)   # Checkbox
-        header_frame.grid_columnconfigure(1, weight=3)              # Domain
-        header_frame.grid_columnconfigure(2, weight=2, minsize=180) # Server
-        header_frame.grid_columnconfigure(3, weight=2, minsize=160) # CF Status
-        header_frame.grid_columnconfigure(4, weight=4)              # NS
-
-        ctk.CTkLabel(header_frame, text="Домен", anchor="w").grid(row=0, column=1, padx=10, sticky="w")
-        ctk.CTkLabel(header_frame, text="Сервер", anchor="w").grid(row=0, column=2, padx=10, sticky="w")
-        ctk.CTkLabel(header_frame, text="Статус Cloudflare", anchor="w").grid(row=0, column=3, padx=10, sticky="w")
-        ctk.CTkLabel(header_frame, text="NS-серверы Cloudflare", anchor="w").grid(row=0, column=4, padx=10, sticky="w")
+        self.domain_header = ctk.CTkFrame(self.tab_container, fg_color=("#e0e0e0", "#333333"), height=30)
+        self.domain_header.pack(fill="x", pady=5)
+        self.update_domain_columns()
 
 
         domain_list_frame = ctk.CTkScrollableFrame(self.tab_container, fg_color="transparent")
@@ -455,45 +451,150 @@ class FastPanelApp(ctk.CTk):
         else:
             for domain_info in self.domains:
                 self.add_domain_row(domain_list_frame, domain_info)
+                
+    def update_domain_columns(self):
+        # Clear existing header
+        for widget in self.domain_header.winfo_children():
+            widget.destroy()
+
+        # Define all possible columns
+        self.all_columns = {
+            "Домен": {"weight": 3, "min": 0, "visible": True, "anchor": "w"},
+            "Сервер": {"weight": 2, "min": 180, "visible": True, "anchor": "w"},
+            "Статус Cloudflare": {"weight": 2, "min": 160, "visible": True, "anchor": "w"},
+            "NS-серверы Cloudflare": {"weight": 4, "min": 0, "visible": self.app_settings['column_visibility'].get("NS-серверы Cloudflare", True), "anchor": "w"},
+            "FTP": {"weight": 1, "min": 80, "visible": True, "anchor": "center"}
+        }
+
+        # Checkbox column
+        self.domain_header.grid_columnconfigure(0, weight=0, minsize=40)
+
+        # Configure and show visible columns
+        col_index = 1
+        for name, props in self.all_columns.items():
+            if props["visible"]:
+                self.domain_header.grid_columnconfigure(col_index, weight=props["weight"], minsize=props["min"])
+                ctk.CTkLabel(self.domain_header, text=name, anchor=props["anchor"]).grid(row=0, column=col_index, padx=10, sticky="ew")
+                col_index += 1
+
+    def show_edit_columns_dialog(self):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Редактировать колонки")
+        dialog.geometry("300x250")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ctk.CTkLabel(dialog, text="Выберите видимые колонки", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=15)
+        
+        # We only allow toggling certain columns
+        togglable_columns = ["NS-серверы Cloudflare"]
+        
+        for col_name in togglable_columns:
+            var = ctk.BooleanVar(value=self.app_settings['column_visibility'].get(col_name, True))
+            cb = ctk.CTkCheckBox(dialog, text=col_name, variable=var, 
+                                 command=lambda name=col_name, v=var: self.toggle_column_visibility(name, v))
+            cb.pack(pady=5, padx=20, anchor="w")
+            
+        ctk.CTkButton(dialog, text="Закрыть", command=dialog.destroy).pack(pady=20)
+
+    def toggle_column_visibility(self, column_name, var):
+        is_visible = var.get()
+        self.app_settings['column_visibility'][column_name] = is_visible
+        self.save_app_settings()
+        self.show_domain_tab() # Refresh the tab to show/hide columns
 
     def add_domain_row(self, parent, domain_info):
         domain = domain_info["domain"]
         domain_frame = ctk.CTkFrame(parent, fg_color=("#ffffff", "#2b2b2b"), corner_radius=0, border_width=1, border_color=("#e0e0e0", "#404040"))
         domain_frame.pack(fill="x", pady=2, ipady=5)
+        
+        # --- Configure Columns based on visibility ---
+        # Checkbox always visible
         domain_frame.grid_columnconfigure(0, weight=0, minsize=40)
-        domain_frame.grid_columnconfigure(1, weight=3)
-        domain_frame.grid_columnconfigure(2, weight=2, minsize=180)
-        domain_frame.grid_columnconfigure(3, weight=2, minsize=160)
-        domain_frame.grid_columnconfigure(4, weight=4)
+        
+        col_index = 1
+        visible_columns_config = {name: props for name, props in self.all_columns.items() if props['visible']}
+        
+        for name, props in visible_columns_config.items():
+            domain_frame.grid_columnconfigure(col_index, weight=props['weight'], minsize=props['min'])
+            col_index += 1
 
+        # --- Widgets ---
         # Checkbox
         var = ctk.BooleanVar()
         checkbox = ctk.CTkCheckBox(domain_frame, text="", variable=var, command=lambda d=domain: self.toggle_domain_selection(d, var))
         checkbox.grid(row=0, column=0, padx=10, sticky="w")
-
+        
+        current_col = 1
+        
         # Domain Label
-        ctk.CTkLabel(domain_frame, text=f"🌐 {domain}", font=ctk.CTkFont(size=14), anchor="w").grid(row=0, column=1, padx=10, sticky="w")
+        ctk.CTkLabel(domain_frame, text=f"🌐 {domain}", font=ctk.CTkFont(size=14), anchor="w").grid(row=0, column=current_col, padx=10, sticky="w")
+        current_col += 1
 
         # Server Dropdown
         server_ips = ["(Не выбран)"] + [s['ip'] for s in self.servers if s.get('ip')]
         server_var = ctk.StringVar(value=domain_info.get("server_ip") or "(Не выбран)")
         server_menu = ctk.CTkOptionMenu(domain_frame, values=server_ips, variable=server_var, width=150, command=lambda ip, d=domain: self.update_domain_server(d, ip))
-        server_menu.grid(row=0, column=2, padx=10, sticky="w")
+        server_menu.grid(row=0, column=current_col, padx=10, sticky="w")
+        current_col += 1
 
         # Cloudflare Status
         status_colors = { "none": ("#666666", "#aaaaaa"), "pending": ("#ff9800", "#f57c00"), "active": ("#4caf50", "#2e7d32"), "error": ("#f44336", "#d32f2f") }
         status_text = { "none": "⚪ Не привязан", "pending": "🟡 В процессе...", "active": "🟢 Активен", "error": "🔴 Ошибка" }
         status = domain_info.get("cloudflare_status", "none")
         status_label = ctk.CTkLabel(domain_frame, text=status_text.get(status), text_color=status_colors.get(status), anchor="w")
-        status_label.grid(row=0, column=3, padx=10, sticky="w")
+        status_label.grid(row=0, column=current_col, padx=10, sticky="w")
+        current_col += 1
 
-        # NS Servers
-        ns_servers = ", ".join(domain_info.get("cloudflare_ns", []))
-        ns_label = ctk.CTkLabel(domain_frame, text=ns_servers, anchor="w", wraplength=300, justify="left")
-        ns_label.grid(row=0, column=4, padx=10, sticky="ew")
+        # NS Servers (if visible)
+        if self.all_columns["NS-серверы Cloudflare"]["visible"]:
+            ns_servers = ", ".join(domain_info.get("cloudflare_ns", []))
+            ns_label = ctk.CTkLabel(domain_frame, text=ns_servers, anchor="w", wraplength=300, justify="left")
+            ns_label.grid(row=0, column=current_col, padx=10, sticky="ew")
+            current_col += 1
+        
+        # FTP Button
+        ftp_button = ctk.CTkButton(domain_frame, text="🖥️ FTP", width=60, command=lambda d=domain_info: self.show_ftp_credentials_dialog(d))
+        ftp_button.grid(row=0, column=current_col, padx=10)
+        if not domain_info.get("ftp_user"):
+            ftp_button.configure(state="disabled")
 
-        self.domain_widgets[domain] = {"frame": domain_frame, "status_label": status_label, "ns_label": ns_label}
+        self.domain_widgets[domain] = {"frame": domain_frame, "status_label": status_label}
+        if self.all_columns["NS-серверы Cloudflare"]["visible"]:
+            self.domain_widgets[domain]["ns_label"] = ns_label
 
+    def show_ftp_credentials_dialog(self, domain_info):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title(f"FTP: {domain_info['domain']}")
+        dialog.geometry("450x250")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ctk.CTkLabel(dialog, text=f"FTP доступы для {domain_info['domain']}", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(20, 15))
+
+        def copy_to_clipboard(text_to_copy):
+            self.clipboard_clear()
+            self.clipboard_append(text_to_copy)
+            self.show_success(f"Скопировано!")
+
+        def create_credential_row(parent, label_text, value_text):
+            row_frame = ctk.CTkFrame(parent, fg_color="transparent")
+            row_frame.pack(fill="x", padx=20, pady=5)
+            
+            ctk.CTkLabel(row_frame, text=label_text, width=80, anchor="w").pack(side="left")
+            
+            value_entry = ctk.CTkEntry(row_frame)
+            value_entry.insert(0, value_text)
+            value_entry.configure(state="readonly")
+            value_entry.pack(side="left", fill="x", expand=True, padx=(10, 5))
+
+            ctk.CTkButton(row_frame, text="📋", width=30, command=lambda: copy_to_clipboard(value_text)).pack(side="left")
+
+        create_credential_row(dialog, "Хост:", domain_info.get("server_ip", "N/A"))
+        create_credential_row(dialog, "Логин:", domain_info.get("ftp_user", "N/A"))
+        create_credential_row(dialog, "Пароль:", domain_info.get("ftp_password", "N/A"))
+
+        ctk.CTkButton(dialog, text="Закрыть", command=dialog.destroy).pack(pady=20)
 
     def toggle_domain_selection(self, domain, var):
         if var.get():
@@ -598,7 +699,7 @@ class FastPanelApp(ctk.CTk):
                 status_colors = { "none": ("#666666", "#aaaaaa"), "pending": ("#ff9800", "#f57c00"), "active": ("#4caf50", "#2e7d32"), "error": ("#f44336", "#d32f2f") }
                 status_text = { "none": "⚪ Не привязан", "pending": "🟡 В процессе...", "active": "🟢 Активен", "error": "🔴 Ошибка" }
                 widget_refs["status_label"].configure(text=status_text.get(status), text_color=status_colors.get(status))
-                if ns_servers:
+                if ns_servers and "ns_label" in widget_refs:
                     widget_refs["ns_label"].configure(text=", ".join(ns_servers))
                 widget_refs["frame"].update_idletasks()
         
@@ -684,7 +785,7 @@ class FastPanelApp(ctk.CTk):
         self.cf_token_entry.insert(0, self.credentials.get("cloudflare_token", ""))
         self.cf_token_entry.configure(show="*")
 
-        self._create_save_cancel_buttons(parent, self.save_settings)
+        self._create_save_cancel_buttons(parent, self.save_credentials)
         
     def _create_namecheap_settings_tab(self, parent):
         ctk.CTkLabel(parent, text="Настройки Namecheap API", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(20, 10))
@@ -702,15 +803,15 @@ class FastPanelApp(ctk.CTk):
         self.nc_ip_entry.insert(0, self.credentials.get("namecheap_ip", ""))
         ctk.CTkButton(ip_frame, text="Получить мой IP", width=120, command=self.fetch_public_ip).pack(side="left", padx=10)
 
-        self._create_save_cancel_buttons(parent, self.save_settings)
+        self._create_save_cancel_buttons(parent, self.save_credentials)
 
     def _create_fastpanel_settings_tab(self, parent):
         ctk.CTkLabel(parent, text="Настройки FastPanel", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(20, 10))
         
         self.fp_path_entry = self._create_setting_row(parent, "Путь к утилите FastPanel:")
-        self.fp_path_entry.insert(0, self.credentials.get("fastpanel_path", ""))
+        self.fp_path_entry.insert(0, self.credentials.get("fastpanel_path", "/usr/local/fastpanel2/fastpanel"))
         
-        self._create_save_cancel_buttons(parent, self.save_settings)
+        self._create_save_cancel_buttons(parent, self.save_credentials)
 
 
     def _create_setting_row(self, parent, label_text, return_frame=False):
@@ -746,7 +847,7 @@ class FastPanelApp(ctk.CTk):
         ip = NamecheapService.get_public_ip()
         self.after(0, lambda: (self.nc_ip_entry.delete(0, "end"), self.nc_ip_entry.insert(0, ip)))
 
-    def save_settings(self):
+    def save_all_settings(self):
         self.credentials["cloudflare_token"] = self.cf_token_entry.get()
         self.credentials["namecheap_user"] = self.nc_user_entry.get()
         self.credentials["namecheap_key"] = self.nc_key_entry.get()
@@ -763,7 +864,30 @@ class FastPanelApp(ctk.CTk):
 
     def save_credentials(self):
         os.makedirs("data", exist_ok=True)
+        self.credentials["cloudflare_token"] = self.cf_token_entry.get()
+        self.credentials["namecheap_user"] = self.nc_user_entry.get()
+        self.credentials["namecheap_key"] = self.nc_key_entry.get()
+        self.credentials["namecheap_ip"] = self.nc_ip_entry.get()
+        self.credentials["fastpanel_path"] = self.fp_path_entry.get()
         with open("data/credentials.json", 'w', encoding='utf-8') as f: json.dump(self.credentials, f, indent=2)
+        self.show_success("Настройки сохранены")
+        
+    def load_app_settings(self):
+        try:
+            with open("data/settings.json", 'r', encoding='utf-8') as f:
+                self.app_settings = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            self.app_settings = {
+                "column_visibility": {
+                    "NS-серверы Cloudflare": True
+                }
+            }
+
+    def save_app_settings(self):
+        os.makedirs("data", exist_ok=True)
+        with open("data/settings.json", 'w', encoding='utf-8') as f:
+            json.dump(self.app_settings, f, indent=2)
+
 
     def show_monitoring_tab(self):
         self.clear_tab_container()
@@ -1259,11 +1383,22 @@ class FastPanelApp(ctk.CTk):
 
     def _update_domain_data(self, updated_domain_info):
         """Обновляет информацию о домене и сохраняет в файл."""
+        domain_name = updated_domain_info.get("domain")
+        if not domain_name:
+            return
+
         for i, d in enumerate(self.domains):
-            if d['domain'] == updated_domain_info['domain']:
-                self.domains[i] = updated_domain_info
+            if d.get('domain') == domain_name:
+                self.domains[i].update(updated_domain_info)
                 break
+        else: # If domain not found, append it (though it should exist)
+            self.domains.append(updated_domain_info)
+            
         self.save_domains()
+        
+        # Refresh domain tab if it's the current one
+        if self.current_tab == "domain":
+            self.show_domain_tab()
 
 
 if __name__ == "__main__":
