@@ -204,7 +204,7 @@ class DatabaseManager:
                 INSERT INTO domains (domain_name, server_id, ftp_user, ftp_password, cloudflare_status, cloudflare_ns)
                 VALUES (:domain_name, :server_id, :ftp_user, :ftp_password, :cloudflare_status, :cloudflare_ns)
             """, {
-                'domain_name': domain_data.get('domain'),
+                'domain_name': domain_data.get('domain_name'),
                 'server_id': domain_data.get('server_id'),
                 'ftp_user': domain_data.get('ftp_user'),
                 'ftp_password': domain_data.get('ftp_password'),
@@ -214,7 +214,7 @@ class DatabaseManager:
             self.conn.commit()
             return True
         except sqlite3.IntegrityError:
-            logger.warning(f"Домен {domain_data.get('domain')} уже существует.")
+            logger.warning(f"Домен {domain_data.get('domain_name')} уже существует.")
             return False
 
     def update_domain(self, domain_name: str, domain_data: Dict[str, Any]):
