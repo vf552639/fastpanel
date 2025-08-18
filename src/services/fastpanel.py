@@ -256,7 +256,7 @@ class FastPanelService:
         result = self.ssh.execute(cmd)
 
         if result.success:
-            return {"success": True, "login": login, "password": password}
+            return {"success": True, "ftp_user": login, "ftp_password": password}
         else:
             logger.error(f"Ошибка создания FTP для {domain}: {result.stderr}")
             return {"success": False, "error": result.stderr}
@@ -276,7 +276,7 @@ class FastPanelService:
             return {"success": False, "error": result.stderr}
 
     def run_domain_automation(self, domain_info: dict, server_credentials: dict, progress_callback: Optional[Callable] = None) -> Dict[str, Any]:
-        domain = domain_info['domain']
+        domain = domain_info['domain_name']
         updated_domain_data = domain_info.copy()
 
         def report_progress(message):
@@ -300,8 +300,8 @@ class FastPanelService:
             ftp_result = self.create_ftp_account(domain)
             if ftp_result['success']:
                 updated_domain_data.update({
-                    'ftp_user': ftp_result['login'],
-                    'ftp_password': ftp_result['password']
+                    'ftp_user': ftp_result['ftp_user'],
+                    'ftp_password': ftp_result['ftp_password']
                 })
                 report_progress("FTP-аккаунт успешно создан.")
             else:
