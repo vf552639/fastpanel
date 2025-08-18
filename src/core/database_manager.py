@@ -173,13 +173,13 @@ class DatabaseManager:
         # Преобразуем bool в int для fastpanel_installed, если оно есть
         if 'fastpanel_installed' in server_data:
             server_data['fastpanel_installed'] = 1 if server_data['fastpanel_installed'] else 0
-            
+
         fields = ", ".join([f"{key} = :{key}" for key in server_data.keys()])
         query = f"UPDATE servers SET {fields} WHERE id = :id"
-        
+
         params = server_data.copy()
         params['id'] = server_id
-        
+
         self.cursor.execute(query, params)
         self.conn.commit()
 
@@ -205,7 +205,7 @@ class DatabaseManager:
                 VALUES (:domain_name, :server_id, :ftp_user, :ftp_password, :cloudflare_status, :cloudflare_ns)
             """, {
                 'domain_name': domain_data.get('domain'),
-                'server_ip': domain_data.get('server_ip'),
+                'server_id': domain_data.get('server_id'),
                 'ftp_user': domain_data.get('ftp_user'),
                 'ftp_password': domain_data.get('ftp_password'),
                 'cloudflare_status': domain_data.get('cloudflare_status'),
@@ -227,10 +227,10 @@ class DatabaseManager:
 
         params = domain_data.copy()
         params['domain_name'] = domain_name
-        
+
         self.cursor.execute(query, params)
         self.conn.commit()
-    
+
     def delete_domain(self, domain_name: str):
         """Удаляет домен по имени."""
         self.cursor.execute("DELETE FROM domains WHERE domain_name = ?", (domain_name,))
@@ -243,7 +243,7 @@ class DatabaseManager:
         self.cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
         row = self.cursor.fetchone()
         return row['value'] if row else default
-        
+
     def get_all_settings(self) -> Dict[str, Any]:
         """Возвращает все настройки в виде словаря."""
         self.cursor.execute("SELECT key, value FROM settings")
@@ -261,7 +261,7 @@ class DatabaseManager:
         # Если значение - словарь или список, сохраняем как JSON строку
         if isinstance(value, (dict, list)):
             value = json.dumps(value)
-            
+
         self.cursor.execute("""
             INSERT INTO settings (key, value) VALUES (?, ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
