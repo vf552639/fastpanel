@@ -326,7 +326,7 @@ class FastPanelApp(ctk.CTk):
                 "ip": ip,
                 "ssh_user": self.server_user_entry.get() or "root",
                 "password": self.server_password_entry.get(),
-                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                "created_at": datetime.now().strftime("%Y-%m-%d")
             }
             if not payload["name"] or not payload["ip"]:
                 self.show_error("Имя и IP обязательны")
@@ -570,8 +570,10 @@ class FastPanelApp(ctk.CTk):
         ctk.CTkLabel(parent, text="Дата добавления", font=ctk.CTkFont(size=12), anchor="w").pack(fill="x", pady=(0, 5))
         self.server_created_at_entry = ctk.CTkEntry(parent, width=400, height=40)
         self.server_created_at_entry.pack(pady=(0, 15), fill="x", expand=True)
-        if data: self.server_created_at_entry.insert(0, data.get("created_at", ""))
-        else: self.server_created_at_entry.insert(0, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        date_str = data.get("created_at", "") if data else ""
+        if not date_str:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+        self.server_created_at_entry.insert(0, date_str.split(" ")[0])
 
 
     def create_existing_server_form(self, parent, data=None):
@@ -593,8 +595,10 @@ class FastPanelApp(ctk.CTk):
         ctk.CTkLabel(parent, text="Дата добавления", font=ctk.CTkFont(size=12), anchor="w").pack(fill="x", pady=(0, 5))
         self.existing_server_created_at_entry = ctk.CTkEntry(parent, width=400, height=40)
         self.existing_server_created_at_entry.pack(pady=(0, 15), fill="x", expand=True)
-        if data: self.existing_server_created_at_entry.insert(0, data.get("created_at", ""))
-        else: self.existing_server_created_at_entry.insert(0, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        date_str = data.get("created_at", "") if data else ""
+        if not date_str:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+        self.existing_server_created_at_entry.insert(0, date_str.split(" ")[0])
 
     def show_domain_tab(self):
         self.clear_tab_container()
@@ -936,7 +940,7 @@ class FastPanelApp(ctk.CTk):
         added_count = 0
         for domain in domains:
             domain_data = {
-                "domain": domain,
+                "domain_name": domain,
                 "server_id": server_id_to_save
             }
             if self.db.add_domain(domain_data):
@@ -982,9 +986,6 @@ class FastPanelApp(ctk.CTk):
         nc_tab = tab_view.add("Namecheap")
         self._create_namecheap_settings_tab(nc_tab)
 
-        fp_tab = tab_view.add("FastPanel")
-        self._create_fastpanel_settings_tab(fp_tab)
-
     def _create_cloudflare_settings_tab(self, parent):
         ctk.CTkLabel(parent, text="Настройки Cloudflare API", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(20, 10))
 
@@ -1011,15 +1012,6 @@ class FastPanelApp(ctk.CTk):
         ctk.CTkButton(ip_frame, text="Получить мой IP", width=120, command=self.fetch_public_ip).pack(side="left", padx=10)
 
         self._create_save_cancel_buttons(parent, self.save_credentials)
-
-    def _create_fastpanel_settings_tab(self, parent):
-        ctk.CTkLabel(parent, text="Настройки FastPanel", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(20, 10))
-
-        self.fp_path_entry = self._create_setting_row(parent, "Путь к утилите FastPanel:")
-        self.fp_path_entry.insert(0, self.credentials.get("fastpanel_path", "/usr/local/fastpanel2/fastpanel"))
-
-        self._create_save_cancel_buttons(parent, self.save_credentials)
-
 
     def _create_setting_row(self, parent, label_text, return_frame=False):
         row = ctk.CTkFrame(parent, fg_color="transparent")
@@ -1086,7 +1078,6 @@ class FastPanelApp(ctk.CTk):
         self.credentials["namecheap_user"] = self.nc_user_entry.get()
         self.credentials["namecheap_key"] = self.nc_key_entry.get()
         self.credentials["namecheap_ip"] = self.nc_ip_entry.get()
-        self.credentials["fastpanel_path"] = self.fp_path_entry.get()
 
         for key, value in self.credentials.items():
             self.db.save_setting(key, value)
@@ -1201,7 +1192,7 @@ class FastPanelApp(ctk.CTk):
         info_items = [
             ("ID", data.get("id")), ("Название", data.get("name")), ("IP", data.get("ip")),
             ("SSH порт", data.get("ssh_port", 22)), ("SSH пользователь", data.get("ssh_user")),
-            ("Дата добавления", data.get("created_at", "N/A")[:10])
+            ("Дата добавления", data.get("created_at", "N/A").split(" ")[0])
         ]
         for label, value in info_items:
             row = ctk.CTkFrame(info_content, fg_color="transparent")
@@ -1400,7 +1391,7 @@ class FastPanelApp(ctk.CTk):
             progress_callback(f"--- Начало работы с доменом: {domain_info['domain_name']} ---")
 
             # Адаптируем domain_info для run_domain_automation
-            domain_info_adapted = {'domain': domain_info['domain_name']}
+            domain_info_adapted = {'domain_name': domain_info['domain_name']}
 
             updated_data = service.run_domain_automation(domain_info_adapted, server_data, progress_callback)
 
@@ -1415,7 +1406,7 @@ class FastPanelApp(ctk.CTk):
 
     def _update_domain_data(self, updated_domain_info):
         """Обновляет информацию о домене и сохраняет в БД."""
-        domain_name = updated_domain_info.get("domain")
+        domain_name = updated_domain_info.get("domain_name")
         if not domain_name:
             return
 
