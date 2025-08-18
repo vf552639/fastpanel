@@ -54,13 +54,13 @@ class FastPanelService:
                 return self.fastpanel_path
             else:
                 logger.error(f"Файл не найден по указанному в настройках пути: {self.fastpanel_path_override}")
-        
+
         result = self.ssh.execute("which fastpanel")
         if result.success and result.stdout.strip():
             self.fastpanel_path = result.stdout.strip()
             logger.info(f"Утилита 'fastpanel' найдена здесь: {self.fastpanel_path}")
             return self.fastpanel_path
-        
+
         fallback_path = "/usr/local/fastpanel2/fastpanel"
         result = self.ssh.execute(f"test -f {fallback_path} && echo {fallback_path}")
         if result.success and result.stdout.strip() == fallback_path:
@@ -74,7 +74,7 @@ class FastPanelService:
     def _check_os(self, report_callback: Callable) -> Optional[str]:
         """Проверяет ОС и возвращает тип пакетного менеджера ('apt' или 'yum')."""
         report_callback("Шаг 1: Определение операционной системы...", 0.1)
-        
+
         os_info_result = self.ssh.execute("cat /etc/os-release")
         if not os_info_result.success:
             report_callback("❌ Не удалось определить ОС.", 1.0)
@@ -137,7 +137,7 @@ class FastPanelService:
 
             report("Шаг 2: Установка необходимых пакетов (curl)...", 0.25)
             prep_command = "apt-get update && apt-get install -y ca-certificates curl" if package_manager == 'apt' else "yum makecache && yum install -y ca-certificates curl"
-            
+
             prep_result = self.ssh.execute(prep_command, get_pty=True)
             if not prep_result.success:
                 result['error'] = f"Ошибка при установке зависимостей: {prep_result.stderr}"
@@ -148,7 +148,7 @@ class FastPanelService:
             report("Шаг 3: Загрузка установочного скрипта...", 0.4)
             download_url = "https://repo.fastpanel.direct/install_fastpanel.sh"
             download_cmd = f"curl -sSLf {download_url} -o {installer_path}"
-            
+
             download_result = None
             max_retries = 3
             for attempt in range(max_retries):
@@ -159,25 +159,25 @@ class FastPanelService:
                 report(f"⚠️ Ошибка загрузки (код: {download_result.exit_code}). Повтор через 5 секунд...", 0.4 + (attempt * 0.02))
                 if attempt < max_retries - 1:
                     time.sleep(5)
-            
+
             if not download_result or not download_result.success:
                 result['error'] = f"Не удалось скачать скрипт установки после {max_retries} попыток. Код ошибки: {download_result.exit_code if download_result else 'N/A'}"
                 report(result['error'], 1.0)
                 return result
-            
+
             report("✅ Скрипт успешно загружен.", 0.5)
-            
+
             report("Шаг 4: Запуск скрипта установки FastPanel...", 0.6)
             report("Это может занять 5-15 минут...", 0.65)
-            
+
             install_cmd = f"bash {installer_path}"
             admin_password = None
             installation_failed_in_log = False
-            
+
             def progress_handler(line):
                 nonlocal admin_password, installation_failed_in_log
                 report(line, 0.8)
-                
+
                 if "[failed]" in line.lower() or "[ошибка]" in line.lower():
                     installation_failed_in_log = True
                     logger.error(f"Обнаружена ошибка в логе установки: {line}")
@@ -227,17 +227,17 @@ class FastPanelService:
 
         site_user = domain.split('.')[0].replace('-', '_')[:12] + "_usr"
         cmd = f"{fp_path} sites create --server-name='{domain}' --owner='{site_user}' --create-user --php-version='{php_version}'"
-        
+
         logger.info(f"Выполнение команды создания сайта: {cmd}")
         result = self.ssh.execute(cmd)
 
         if not result.success:
             logger.error(f"Ошибка создания сайта {domain}: {result.stderr}")
             return {"success": False, "error": result.stderr}
-        
+
         expected_path = f"/var/www/{site_user}/data/www/{domain}"
         check_result = self.ssh.execute(f"test -d {expected_path}")
-        
+
         if not check_result.success:
             error_msg = f"Сайт создан, но не найден по ожидаемому пути: {expected_path}"
             logger.error(error_msg)
@@ -248,7 +248,7 @@ class FastPanelService:
     def create_ftp_account(self, domain: str) -> Dict[str, Any]:
         fp_path = self._get_fastpanel_path()
         if not fp_path: return {"success": False, "error": "fastpanel not found"}
-        
+
         login = "ftp_" + domain.split('.')[0].replace('-', '_')
         password = generate_password()
         cmd = f"{fp_path} ftp_account create --login='{login}' --password='{password}' --site='{domain}'"
@@ -264,7 +264,7 @@ class FastPanelService:
     def issue_ssl_certificate(self, domain: str, email: str) -> Dict[str, Any]:
         fp_path = self._get_fastpanel_path()
         if not fp_path: return {"success": False, "error": "fastpanel not found"}
-        
+
         cmd = f"{fp_path} certificates create-le --server-name='{domain}' --email='{email}'"
         logger.info("Попытка выпуска SSL-сертификата...")
         result = self.ssh.execute(cmd)
@@ -289,7 +289,7 @@ class FastPanelService:
             if not site_result['success']:
                 report_progress(f"ОШИБКА: Не удалось создать сайт. {site_result.get('error', '')}")
                 return updated_domain_data
-            
+
             updated_domain_data.update({
                 'site_user': site_result['site_user'],
                 'path': site_result['path']
@@ -319,5 +319,5 @@ class FastPanelService:
         except Exception as e:
             report_progress(f"КРИТИЧЕСКАЯ ОШИБКА: {e}")
             logger.error(f"Критическая ошибка при автоматизации домена {domain}: {e}", exc_info=True)
-            
+
         return updated_domain_data
