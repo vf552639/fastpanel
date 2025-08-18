@@ -64,7 +64,7 @@ class FastPanelService:
             return self.fastpanel_path
         
         # 3. Попытка найти в стандартном месте
-        fallback_path = "/usr/local/fastpanel2/app/bin/fastpanel"
+        fallback_path = "/usr/local/fastpanel2/fastpanel"
         result = self.ssh.execute(f"test -f {fallback_path} && echo {fallback_path}")
         if result.success and result.stdout.strip() == fallback_path:
             self.fastpanel_path = fallback_path
@@ -80,7 +80,7 @@ class FastPanelService:
         fp_path = self._get_fastpanel_path()
         if not fp_path: return {"success": False, "error": "Не удалось найти утилиту fastpanel на сервере. Проверьте путь в Настройках."}
 
-        site_user = "user_" + domain.split('.')[0].replace('-', '_')
+        site_user = domain.split('.')[0].replace('-', '_')[:12] + "_usr"
         cmd = f"{fp_path} sites create --server-name='{domain}' --owner='{site_user}' --create-user --php-version='{php_version}'"
         
         logger.info(f"Выполнение команды создания сайта: {cmd}")
