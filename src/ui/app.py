@@ -380,6 +380,13 @@ class FastPanelApp(ctk.CTk):
         # Перерисовываем UI
         self._update_server_list()
 
+    def delete_domain(self, domain_info):
+        self.db.delete_domain(domain_info['domain_name'])
+        self.log_action(f"Домен {domain_info['domain_name']} удален", level="WARNING")
+        self.show_success(f"Домен {domain_info['domain_name']} удален")
+        self.refresh_data()
+        self.show_domain_tab()
+
     def delete_domain_from_server(self, domain, server_data):
         self.db.delete_domain(domain['domain_name'])
         self.log_action(f"Домен {domain['domain_name']} удален с сервера {server_data['name']}", level="WARNING")
@@ -615,6 +622,9 @@ class FastPanelApp(ctk.CTk):
         self.bind_cf_button = ctk.CTkButton(action_panel, text="🔗 Привязать к Cloudflare", state="disabled", command=self.start_cloudflare_binding)
         self.bind_cf_button.pack(side="left", padx=10)
 
+        self.delete_domain_button = ctk.CTkButton(action_panel, text="🗑️ Удалить выбранные", state="disabled", fg_color=("#f44336", "#d32f2f"), hover_color=("#da190b", "#b71c1c"), command=self.confirm_delete_selected_domains)
+        self.delete_domain_button.pack(side="left", padx=10)
+
         ctk.CTkButton(action_panel, text="✏️ Редактировать колонки", command=self.show_edit_columns_dialog).pack(side="left", padx=10)
 
         self.domain_header = ctk.CTkFrame(self.tab_container, fg_color=("#e0e0e0", "#333333"), height=30)
@@ -629,6 +639,35 @@ class FastPanelApp(ctk.CTk):
         else:
             for domain_info in self.domains:
                 self.add_domain_row(domain_list_frame, domain_info)
+    
+    def confirm_delete_selected_domains(self):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Подтверждение удаления")
+        dialog.geometry("400x200")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        content = ctk.CTkFrame(dialog, fg_color="transparent")
+        content.pack(fill="both", expand=True, padx=30, pady=30)
+        
+        ctk.CTkLabel(content, text="⚠️ Удаление доменов", font=ctk.CTkFont(size=18, weight="bold"), text_color=("#f44336", "#f44336")).pack(pady=(0, 20))
+        ctk.CTkLabel(content, text=f"Вы уверены, что хотите удалить {len(self.selected_domains)} домен(ов)?", font=ctk.CTkFont(size=12)).pack(pady=(0, 30))
+        
+        buttons_frame = ctk.CTkFrame(content, fg_color="transparent")
+        buttons_frame.pack()
+        
+        ctk.CTkButton(buttons_frame, text="Отмена", width=100, fg_color="transparent", border_width=1, text_color=("#000000", "#ffffff"), border_color=("#e0e0e0", "#404040"), command=dialog.destroy).pack(side="left", padx=(0, 10))
+        ctk.CTkButton(buttons_frame, text="Удалить", width=100, fg_color=("#f44336", "#d32f2f"), hover_color=("#da190b", "#b71c1c"), command=lambda: self.delete_selected_domains(dialog)).pack(side="left")
+
+    def delete_selected_domains(self, dialog):
+        for domain_name in list(self.selected_domains):
+            self.db.delete_domain(domain_name)
+            self.log_action(f"Домен {domain_name} удален", level="WARNING")
+
+        self.refresh_data()
+        self.show_domain_tab()
+        dialog.destroy()
+        self.show_success(f"Выбранные домены удалены")
 
     def update_domain_columns(self):
         for widget in self.domain_header.winfo_children():
@@ -694,6 +733,10 @@ class FastPanelApp(ctk.CTk):
         for name, props in visible_columns_config.items():
             domain_frame.grid_columnconfigure(col_index, weight=props['weight'], minsize=props['min'])
             col_index += 1
+        
+        # Add a column for the delete button
+        domain_frame.grid_columnconfigure(col_index, weight=0, minsize=40)
+
 
         # --- Widgets ---
         # Checkbox
@@ -742,6 +785,13 @@ class FastPanelApp(ctk.CTk):
         ftp_button.grid(row=0, column=current_col, padx=10)
         if not domain_info.get("ftp_user"):
             ftp_button.configure(state="disabled")
+        
+        current_col += 1
+
+        # Delete button for single domain
+        delete_button = ctk.CTkButton(domain_frame, text="🗑️", width=30, fg_color=("#f44336", "#d32f2f"), hover_color=("#da190b", "#b71c1c"), command=lambda d=domain_info: self.delete_domain(d))
+        delete_button.grid(row=0, column=current_col, padx=10, sticky="e")
+
 
         self.domain_widgets[domain] = {"frame": domain_frame, "status_label": status_label}
         if self.all_columns["NS-серверы Cloudflare"]["visible"]:
@@ -794,8 +844,10 @@ class FastPanelApp(ctk.CTk):
 
         if self.selected_domains:
             self.bind_cf_button.configure(state="normal")
+            self.delete_domain_button.configure(state="normal")
         else:
             self.bind_cf_button.configure(state="disabled")
+            self.delete_domain_button.configure(state="disabled")
 
     def update_domain_server(self, domain, server_ip):
         server = next((s for s in self.servers if s['ip'] == server_ip), None)
