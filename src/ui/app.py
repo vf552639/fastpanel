@@ -20,6 +20,7 @@ from functools import partial
 from src.services.cloudflare_service import CloudflareService
 from src.services.namecheap_service import NamecheapService
 
+
 # Настройка внешнего вида
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
