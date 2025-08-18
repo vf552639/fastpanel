@@ -2,6 +2,8 @@
 FastPanel Service - все операции с FastPanel
 """
 import re
+import secrets
+import string
 from typing import Dict, Optional, Any, Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -12,6 +14,13 @@ from src.utils.logger import get_logger
 from src.config import config
 
 logger = get_logger("fastpanel")
+
+
+def generate_password(length=12):
+    """Генерирует надежный пароль."""
+    alphabet = string.ascii_letters + string.digits
+    password = ''.join(secrets.choice(alphabet) for i in range(length))
+    return password
 
 @dataclass
 class FastPanelInfo:
@@ -26,182 +35,149 @@ class FastPanelInfo:
 class FastPanelService:
     """Сервис для работы с FastPanel"""
 
-    def __init__(self, ssh_manager: SSHManager = None):
+    def __init__(self, ssh_manager: SSHManager = None, fastpanel_path: Optional[str] = None):
         self.ssh = ssh_manager or SSHManager()
+        self.fastpanel_path_override = fastpanel_path
+        self.fastpanel_path = None
 
-    def _get_os_info(self) -> Optional[Dict[str, str]]:
-        """Определяет ОС, ее имя, семейство и версию."""
-        if not self.ssh.connected:
-            return None
-        
-        result = self.ssh.execute("cat /etc/os-release")
-        if not result.success:
-            return None
-            
-        os_info = dict(line.split('=', 1) for line in result.stdout.split('\n') if '=' in line)
-        os_name = os_info.get('NAME', '').strip('"')
-        os_id = os_info.get('ID', '').strip('"').lower()
-        os_version = os_info.get('VERSION_ID', '').strip('"')
+    def _get_fastpanel_path(self) -> Optional[str]:
+        """Определяет путь к исполняемому файлу fastpanel, отдавая приоритет настройкам."""
+        if self.fastpanel_path:
+            return self.fastpanel_path
 
-        family = None
-        if "ubuntu" in os_id or "debian" in os_id:
-            family = "debian"
-        elif "centos" in os_id or "almalinux" in os_id or "rocky" in os_id:
-            family = "centos"
+        # 1. Приоритет: путь из настроек
+        if self.fastpanel_path_override:
+            logger.info(f"Используется путь из настроек: {self.fastpanel_path_override}")
+            check_result = self.ssh.execute(f"test -f {self.fastpanel_path_override}")
+            if check_result.success:
+                self.fastpanel_path = self.fastpanel_path_override
+                return self.fastpanel_path
+            else:
+                logger.error(f"Файл не найден по указанному в настройках пути: {self.fastpanel_path_override}")
+                # Продолжаем поиск, чтобы попытаться найти автоматически
         
-        if family:
-            return {"name": os_name, "family": family, "version": os_version}
+        # 2. Поиск через which
+        result = self.ssh.execute("which fastpanel")
+        if result.success and result.stdout.strip():
+            self.fastpanel_path = result.stdout.strip()
+            logger.info(f"Утилита 'fastpanel' найдена здесь: {self.fastpanel_path}")
+            return self.fastpanel_path
         
+        # 3. Попытка найти в стандартном месте
+        fallback_path = "/usr/local/fastpanel2/app/bin/fastpanel"
+        result = self.ssh.execute(f"test -f {fallback_path} && echo {fallback_path}")
+        if result.success and result.stdout.strip() == fallback_path:
+            self.fastpanel_path = fallback_path
+            logger.info(f"Утилита 'fastpanel' найдена по стандартному пути: {self.fastpanel_path}")
+            return self.fastpanel_path
+
+        logger.error("Критическая ошибка: Не удалось найти исполняемый файл 'fastpanel' на сервере.")
         return None
 
-    def _configure_firewall(self, callback: Optional[Callable] = None):
-        """Проверяет и настраивает UFW для доступа к FastPanel."""
-        if callback:
-            callback("Проверка настроек файрвола (UFW)...", 0.9)
 
-        status_result = self.ssh.execute("sudo ufw status")
-        
-        # Если UFW неактивен, ничего делать не нужно
-        if "Status: inactive" in status_result.stdout:
-            if callback:
-                callback("Файрвол неактивен, порт 8888 должен быть доступен.", 0.95)
-            return
+    def create_site(self, domain: str, php_version: str = "7.4") -> Dict[str, Any]:
+        """Создает сайт в FastPanel и верифицирует путь."""
+        fp_path = self._get_fastpanel_path()
+        if not fp_path: return {"success": False, "error": "Не удалось найти утилиту fastpanel на сервере. Проверьте путь в Настройках."}
 
-        # Проверяем, открыт ли уже порт 8888
-        if "8888/tcp" in status_result.stdout and "ALLOW" in status_result.stdout:
-            if callback:
-                callback("Порт 8888 уже открыт в файрволе.", 0.95)
-            return
+        site_user = "user_" + domain.split('.')[0].replace('-', '_')
+        cmd = f"{fp_path} sites create --server-name='{domain}' --owner='{site_user}' --create-user --php-version='{php_version}'"
         
-        # Если порт закрыт, открываем его
-        if callback:
-            callback("Порт 8888 закрыт. Открываем...", 0.92)
-        
-        allow_result = self.ssh.execute("sudo ufw allow 8888/tcp")
-        if not allow_result.success:
-            logger.warning("Не удалось выполнить команду 'ufw allow 8888/tcp'.")
-            if callback:
-                callback("⚠️ Не удалось добавить правило для порта 8888.", 0.95)
-            return # Прерываем, так как reload не имеет смысла
+        logger.info(f"Выполнение команды создания сайта: {cmd}")
+        result = self.ssh.execute(cmd)
 
-        if callback:
-            callback("Правило для порта 8888 добавлено. Обновляем файрвол...", 0.95)
+        if not result.success:
+            logger.error(f"Ошибка создания сайта {domain}: {result.stderr}")
+            return {"success": False, "error": result.stderr}
         
-        reload_result = self.ssh.execute("sudo ufw reload")
-        if reload_result.success:
-            if callback:
-                callback("✅ Файрвол успешно обновлен.", 0.98)
+        # Верификация пути
+        expected_path = f"/var/www/{site_user}/data/www/{domain}"
+        check_result = self.ssh.execute(f"test -d {expected_path}")
+        
+        if not check_result.success:
+            error_msg = f"Сайт создан, но не найден по ожидаемому пути: {expected_path}"
+            logger.error(error_msg)
+            return {"success": False, "error": error_msg}
+
+        return {"success": True, "site_user": site_user, "path": expected_path}
+
+
+    def create_ftp_account(self, domain: str) -> Dict[str, Any]:
+        """Создает FTP-аккаунт для сайта."""
+        fp_path = self._get_fastpanel_path()
+        if not fp_path: return {"success": False, "error": "fastpanel not found"}
+        
+        login = "ftp_" + domain.split('.')[0].replace('-', '_')
+        password = generate_password()
+        cmd = f"{fp_path} ftp_account create --login='{login}' --password='{password}' --site='{domain}'"
+        logger.info("Выполнение команды создания FTP-аккаунта...")
+        result = self.ssh.execute(cmd)
+
+        if result.success:
+            return {"success": True, "login": login, "password": password}
         else:
-            logger.warning("Не удалось выполнить команду 'ufw reload'.")
-            if callback:
-                callback("⚠️ Не удалось перезагрузить файрвол.", 0.98)
+            logger.error(f"Ошибка создания FTP для {domain}: {result.stderr}")
+            return {"success": False, "error": result.stderr}
 
-    def install(self, host: str, username: str, password: str, callback: Optional[Callable] = None) -> Dict[str, Any]:
-        """
-        Установка FastPanel с предварительной проверкой совместимости ОС и настройкой файрвола.
-        """
-        result = {'success': False, 'admin_url': None, 'admin_password': "Not found", 'error': None}
+    def issue_ssl_certificate(self, domain: str, email: str) -> Dict[str, Any]:
+        """Выпускает SSL-сертификат Let's Encrypt."""
+        fp_path = self._get_fastpanel_path()
+        if not fp_path: return {"success": False, "error": "fastpanel not found"}
+        
+        cmd = f"{fp_path} certificates create-le --server-name='{domain}' --email='{email}'"
+        logger.info("Попытка выпуска SSL-сертификата...")
+        result = self.ssh.execute(cmd)
 
-        def update_progress(message: str, progress: float):
-            if callback:
-                callback(message, progress)
+        if result.success:
+            return {"success": True}
+        else:
+            logger.warning(f"Не удалось выпустить SSL для {domain}: {result.stderr}")
+            return {"success": False, "error": result.stderr}
+
+    def run_domain_automation(self, domain_info: dict, server_credentials: dict, progress_callback: Optional[Callable] = None) -> Dict[str, Any]:
+        """Выполняет полную автоматизацию для одного домена, используя существующее SSH-соединение."""
+        domain = domain_info['domain']
+        updated_domain_data = domain_info.copy()
+
+        def report_progress(message):
+            if progress_callback:
+                progress_callback(f"[{domain}] {message}")
 
         try:
-            update_progress(f"Подключение к {host}...", 0.05)
-            if not self.ssh.connect(host, username, password):
-                result['error'] = "Не удалось подключиться по SSH. Проверьте IP, логин и пароль."
-                update_progress(f"❌ Ошибка: {result['error']}", 0)
-                return result
+            # 1. Создание сайта
+            report_progress("Шаг 1: Создание сайта...")
+            site_result = self.create_site(domain)
+            if not site_result['success']:
+                report_progress(f"ОШИБКА: Не удалось создать сайт. {site_result.get('error', '')}")
+                return updated_domain_data
             
-            update_progress("✅ Авторизация на сервере прошла успешно!", 0.1)
-            
-            update_progress("Определение операционной системы...", 0.15)
-            os_data = self._get_os_info()
-            if not os_data:
-                result['error'] = "Не удалось определить ОС или ОС не поддерживается."
-                update_progress(f"❌ Ошибка: {result['error']}", 0)
-                return result
-            
-            os_name, os_family, os_version = os_data['name'], os_data['family'], os_data['version']
-            update_progress(f"ОС определена: {os_name} {os_version}", 0.2)
+            updated_domain_data['site_user'] = site_result['site_user']
+            report_progress(f"Сайт успешно создан. Пользователь: {site_result['site_user']}")
+            report_progress(f"Путь к сайту: {site_result['path']}")
 
-            supported_versions = ["20.04", "22.04"]
-            if os_family == "debian" and not any(v in os_version for v in supported_versions):
-                result['error'] = f"Версия {os_name} {os_version} не поддерживается установщиком FastPanel."
-                update_progress(f"❌ Ошибка: {result['error']}", 0)
-                return result
 
-            prep_commands = {
-                "debian": "apt-get update -qq && apt-get install -y ca-certificates wget",
-                "centos": "yum makecache -y && yum install -y ca-certificates wget"
-            }
-            
-            update_progress("Подготовка системы и установка пакетов...", 0.3)
-            prep_command = prep_commands.get(os_family)
-            prep_result = self.ssh.execute(prep_command, timeout=300)
-            if not prep_result.success:
-                logger.warning(f"Команда подготовки системы завершилась с ошибкой: {prep_result.stderr}")
-                update_progress("⚠️ Предупреждение: не удалось выполнить команды подготовки.", 0.4)
+            # 2. Создание FTP
+            report_progress("Шаг 2: Создание FTP-аккаунта...")
+            ftp_result = self.create_ftp_account(domain)
+            if ftp_result['success']:
+                updated_domain_data['ftp_user'] = ftp_result['login']
+                updated_domain_data['ftp_password'] = ftp_result['password']
+                report_progress("FTP-аккаунт успешно создан.")
             else:
-                update_progress("Система подготовлена.", 0.4)
+                report_progress(f"ПРЕДУПРЕЖДЕНИЕ: Не удалось создать FTP-аккаунт. {ftp_result.get('error', '')}")
 
-            update_progress("Запуск установщика FASTPANEL (это может занять несколько минут)...", 0.5)
-            install_cmd = "wget https://repo.fastpanel.direct/install_fastpanel.sh -O - | bash -"
-            
-            output_log = []
-            admin_url, admin_password = None, None
-
-            def parse_output(line: str):
-                nonlocal admin_url, admin_password
-                clean_line = line.strip()
-                if not clean_line: return
-                
-                ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-                clean_line = ansi_escape.sub('', clean_line)
-
-                output_log.append(clean_line)
-                update_progress(clean_line, 0.5)
-
-                if clean_line.lower().lstrip().startswith("password:") or clean_line.lower().lstrip().startswith("пароль:"):
-                    pass_match = re.search(r':\s*(\S+)', clean_line)
-                    if pass_match:
-                        admin_password = pass_match.group(1).strip()
-                        logger.info(f"Найден пароль администратора: {admin_password}")
-
-                if "https://" in clean_line and ":8888" in clean_line:
-                    url_match = re.search(r'(https?://\S+:8888)', clean_line)
-                    if url_match: admin_url = url_match.group(1)
-
-            install_result = self.ssh.execute_with_progress(install_cmd, parse_output)
-
-            update_progress("Установка завершена. Обработка результатов...", 0.85)
-            if not admin_url: admin_url = f"https://{host}:8888"
-
-            success_phrase = "Congratulations! FASTPANEL successfully installed"
-            if (install_result.success or any(success_phrase in line for line in output_log)) and admin_password:
-                
-                # --- НОВЫЙ БЛОК: НАСТРОЙКА ФАЙРВОЛА ---
-                if os_family == "debian": # UFW используется в основном на Debian/Ubuntu
-                    self._configure_firewall(update_progress)
-                # --- КОНЕЦ НОВОГО БЛОКА ---
-
-                result.update({
-                    'success': True, 'admin_url': admin_url, 'admin_password': admin_password,
-                    'install_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                })
-                update_progress("✅ Установка и настройка успешно завершены!", 1.0)
+            # 3. Выпуск SSL
+            report_progress("Шаг 3: Выпуск SSL-сертификата...")
+            ssl_result = self.issue_ssl_certificate(domain, f"admin@{domain}")
+            if ssl_result['success']:
+                updated_domain_data['ssl_status'] = 'active'
+                report_progress("SSL-сертификат успешно выпущен.")
             else:
-                error_details = install_result.stderr or "\n".join(output_log[-10:])
-                result['error'] = f"Установка завершилась с ошибкой: {error_details}"
-                if not admin_password:
-                     result['error'] += "\nНе удалось найти пароль администратора в выводе."
-                update_progress(f"❌ {result['error']}", 0)
+                updated_domain_data['ssl_status'] = 'error'
+                report_progress(f"ПРЕДУПРЕЖДЕНИЕ: Ошибка выпуска SSL. {ssl_result.get('error', '')}")
 
         except Exception as e:
-            result['error'] = str(e)
-            logger.error(f"Критическая ошибка: {e}", exc_info=True)
-            update_progress(f"❌ Критическая ошибка: {e}", 0)
-        finally:
-            self.ssh.disconnect()
+            report_progress(f"КРИТИЧЕСКАЯ ОШИБКА: {e}")
+            logger.error(f"Критическая ошибка при автоматизации домена {domain}: {e}", exc_info=True)
             
-        return result
+        return updated_domain_data
