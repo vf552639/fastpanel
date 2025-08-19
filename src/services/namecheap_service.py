@@ -14,8 +14,8 @@ class NamecheapService:
         self.api_user = api_user
         self.api_key = api_key
         self.client_ip = client_ip
-        # Using sandbox for safety, change to production URL when ready
-        self.base_url = "https://api.sandbox.namecheap.com/xml.response"
+        # ИЗМЕНЕНО: URL изменен на рабочий (production)
+        self.base_url = "https://api.namecheap.com/xml.response"
 
 
     def update_nameservers(self, domain_name: str, nameservers: List[str]) -> bool:
@@ -43,7 +43,8 @@ class NamecheapService:
         try:
             response = requests.get(self.base_url, params=params, timeout=20)
             response.raise_for_status()
-            if '<Error' in response.text:
+            # Более надежная проверка на ошибку в XML
+            if '<Error' in response.text and 'Number="0"' not in response.text:
                 logger.error(f"Namecheap API error for {domain_name}: {response.text}")
                 return False
             logger.info(f"Successfully updated nameservers for {domain_name} at Namecheap.")
