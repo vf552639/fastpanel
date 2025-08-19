@@ -288,22 +288,43 @@ class FastPanelService:
         else:
             logger.error(f"Ошибка создания FTP для {domain}: {result.stderr}")
             return {"success": False, "error": result.stderr}
-
+    
+    ## ИЗМЕНЕНО: Добавлена надежная проверка SSL
     def issue_ssl_certificate(self, domain: str, email: str) -> Dict[str, Any]:
         fp_path = self._get_fastpanel_path()
         if not fp_path: return {"success": False, "error": "fastpanel not found"}
 
-        cmd = f"{fp_path} certificates create-le --server-name='{domain}' --email='{email}'"
-        logger.info("Попытка выпуска SSL-сертификата...")
-        result = self.ssh.execute(cmd)
+        if not email:
+            return {"success": False, "error": "Email не указан для выпуска SSL сертификата."}
 
-        if result.success:
-            return {"success": True}
-        else:
+        cmd = f"{fp_path} certificates create-le --server-name='{domain}' --email='{email}'"
+        logger.info(f"Попытка выпуска SSL-сертификата для {domain} с email {email}...")
+        
+        # Запускаем команду выпуска
+        result = self.ssh.execute(cmd, timeout=300) # Увеличим таймаут для SSL
+
+        # Даже если команда завершилась с кодом 0, нужна дополнительная проверка
+        if not result.success:
             logger.warning(f"Не удалось выпустить SSL для {domain}: {result.stderr}")
             return {"success": False, "error": result.stderr}
 
-    def run_domain_automation(self, domain_info: dict, server_credentials: dict, progress_callback: Optional[Callable] = None) -> Dict[str, Any]:
+        # Пауза, чтобы дать файловой системе время обновиться
+        time.sleep(5)
+
+        # Проверяем наличие файла сертификата на сервере
+        cert_path = f"/etc/letsencrypt/live/{domain}/fullchain.pem"
+        check_cert_cmd = f"test -f {cert_path}"
+        cert_check_result = self.ssh.execute(check_cert_cmd)
+
+        if cert_check_result.success:
+            logger.info(f"Проверка подтвердила наличие SSL сертификата для {domain}")
+            return {"success": True}
+        else:
+            error_msg = "Команда выполнена, но файл сертификата не найден. Домен не прошел проверку Let's Encrypt."
+            logger.warning(f"Ошибка для домена {domain}: {error_msg}")
+            return {"success": False, "error": error_msg}
+
+    def run_domain_automation(self, domain_info: dict, server_credentials: dict, progress_callback: Optional[Callable] = None, ssl_email: Optional[str] = None) -> Dict[str, Any]:
         domain = domain_info['domain_name']
         updated_domain_data = domain_info.copy()
 
@@ -336,13 +357,17 @@ class FastPanelService:
                 report_progress(f"ПРЕДУПРЕЖДЕНИЕ: Не удалось создать FTP-аккаунт. {ftp_result.get('error', '')}")
 
             report_progress("Шаг 3: Выпуск SSL-сертификата...")
-            ssl_result = self.issue_ssl_certificate(domain, f"admin@{domain}")
-            if ssl_result['success']:
-                updated_domain_data['ssl_status'] = 'active'
-                report_progress("SSL-сертификат успешно выпущен.")
+            if ssl_email:
+                ssl_result = self.issue_ssl_certificate(domain, ssl_email)
+                if ssl_result['success']:
+                    updated_domain_data['ssl_status'] = 'active'
+                    report_progress("SSL-сертификат успешно выпущен.")
+                else:
+                    updated_domain_data['ssl_status'] = 'error'
+                    report_progress(f"ПРЕДУПРЕЖДЕНИЕ: Ошибка выпуска SSL. {ssl_result.get('error', '')}")
             else:
-                updated_domain_data['ssl_status'] = 'error'
-                report_progress(f"ПРЕДУПРЕЖДЕНИЕ: Ошибка выпуска SSL. {ssl_result.get('error', '')}")
+                updated_domain_data['ssl_status'] = 'none'
+                report_progress("ПРЕДУПРЕЖДЕНИЕ: Email для SSL не указан в настройках, шаг пропущен.")
 
         except Exception as e:
             report_progress(f"КРИТИЧЕСКАЯ ОШИБКА: {e}")
