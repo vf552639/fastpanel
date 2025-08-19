@@ -26,6 +26,24 @@ from src.core.database_manager import DatabaseManager
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
+class InstructionWindow(ctk.CTkToplevel):
+    """Окно для отображения инструкций."""
+    def __init__(self, parent, title, instruction_text):
+        super().__init__(parent)
+        self.title(title)
+        self.geometry("600x400")
+        self.transient(parent)
+        self.grab_set()
+
+        self.textbox = ctk.CTkTextbox(self, wrap="word", font=("Arial", 14))
+        self.textbox.pack(padx=20, pady=20, fill="both", expand=True)
+        self.textbox.insert("1.0", instruction_text)
+        self.textbox.configure(state="disabled")
+
+        close_button = ctk.CTkButton(self, text="Закрыть", command=self.destroy)
+        close_button.pack(pady=10)
+
+
 class AutomationProgressWindow(ctk.CTkToplevel):
     """Окно для отображения прогресса и логов автоматизации."""
     def __init__(self, parent, server_name, total_domains):
@@ -736,11 +754,21 @@ class FastPanelApp(ctk.CTk):
         self.show_success(f"Сервер для домена обновлен")
 
     def start_cloudflare_binding(self):
-        if not self.credentials.get("cloudflare_token"): self.show_error("Не указан API токен для Cloudflare в настройках."); return
-        if not self.credentials.get("namecheap_user") or not self.credentials.get("namecheap_key") or not self.credentials.get("namecheap_ip"): self.show_error("Не указаны все данные для Namecheap в настройках."); return
+        # *** ИЗМЕНЕНИЕ: Проверяем и email тоже ***
+        if not self.credentials.get("cloudflare_token") or not self.credentials.get("cloudflare_email"):
+            self.show_error("Не указан API токен или E-mail для Cloudflare в настройках.")
+            return
+
+        if not self.credentials.get("namecheap_user") or not self.credentials.get("namecheap_key") or not self.credentials.get("namecheap_ip"):
+            self.show_error("Не указаны все данные для Namecheap в настройках.")
+            return
+
         for domain_name in self.selected_domains:
             domain_info = next((d for d in self.domains if d["domain_name"] == domain_name), None)
-            if not domain_info or not domain_info.get("server_id"): self.show_error(f"Домен '{domain_name}' не ассоциирован с сервером."); return
+            if not domain_info or not domain_info.get("server_id"):
+                self.show_error(f"Домен '{domain_name}' не ассоциирован с сервером.")
+                return
+
         for domain_name in self.selected_domains:
             self.update_domain_status_ui(domain_name, "pending")
             thread = threading.Thread(target=self._bind_domain_thread, args=(domain_name,), daemon=True)
@@ -754,24 +782,34 @@ class FastPanelApp(ctk.CTk):
             self.log_action(f"Не найден сервер для домена {domain_name}.", "ERROR")
             self.update_domain_status_ui(domain_name, "error"); return
         server_ip = server["ip"]
-        cf_service = CloudflareService(self.credentials.get("cloudflare_token"))
+        
+        # *** ИЗМЕНЕНИЕ: Передаем и email в сервис ***
+        cf_service = CloudflareService(
+            api_token=self.credentials.get("cloudflare_token"),
+            email=self.credentials.get("cloudflare_email")
+        )
         nc_service = NamecheapService(self.credentials.get("namecheap_user"), self.credentials.get("namecheap_key"), self.credentials.get("namecheap_ip"))
+        
         zone_info = cf_service.add_zone(domain_name)
         if not zone_info:
             self.log_action(f"Ошибка добавления зоны {domain_name} в Cloudflare.", "ERROR")
             self.update_domain_status_ui(domain_name, "error"); return
         zone_id, name_servers = zone_info
         self.log_action(f"Зона {domain_name} успешно создана в Cloudflare.", "SUCCESS")
+
         if not cf_service.create_a_records(zone_id, server_ip):
             self.log_action(f"Ошибка создания A-записей для {domain_name}.", "ERROR")
             self.update_domain_status_ui(domain_name, "error"); return
         self.log_action(f"A-записи для {domain_name} созданы.", "SUCCESS")
+
         if not nc_service.update_nameservers(domain_name, name_servers):
             self.log_action(f"Ошибка обновления NS-серверов в Namecheap для {domain_name}", "ERROR")
             self.update_domain_status_ui(domain_name, "error"); return
         self.log_action(f"NS-записи для {domain_name} обновлены в Namecheap.", "SUCCESS")
+        
         self.update_domain_status_ui(domain_name, "active", name_servers)
         self.log_action(f"Домен {domain_name} успешно привязан.", "SUCCESS")
+
 
     def start_ssl_issuance(self, domain_info):
         domain_name = domain_info['domain_name']
@@ -906,16 +944,29 @@ class FastPanelApp(ctk.CTk):
         self._create_save_cancel_buttons(parent, self.save_all_settings)
 
     def _create_cloudflare_settings_tab(self, parent):
-        ctk.CTkLabel(parent, text="Настройки Cloudflare API", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(20, 10))
-        self.cf_token_entry = self._create_setting_row(parent, "API Token:")
+        header_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        header_frame.pack(fill="x", padx=20, pady=(20, 10))
+        ctk.CTkLabel(header_frame, text="Настройки Cloudflare API", font=ctk.CTkFont(size=16, weight="bold")).pack(side="left")
+        ctk.CTkButton(header_frame, text="Как получить API?", command=self.show_cloudflare_instructions).pack(side="left", padx=10)
+
+        # *** ИЗМЕНЕНИЕ: Добавлено поле для E-mail ***
+        self.cf_email_entry = self._create_setting_row(parent, "E-mail аккаунта:")
+        self.cf_email_entry.insert(0, self.credentials.get("cloudflare_email", ""))
+
+        self.cf_token_entry = self._create_setting_row(parent, "Global API Key:")
         self.cf_token_entry.insert(0, self.credentials.get("cloudflare_token", ""))
         self.cf_token_entry.configure(show="*")
         self._create_save_cancel_buttons(parent, self.save_all_settings)
 
+
     def _create_namecheap_settings_tab(self, parent):
-        ctk.CTkLabel(parent, text="Настройки Namecheap API", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(20, 10))
+        header_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        header_frame.pack(fill="x", padx=20, pady=(20, 10))
+        ctk.CTkLabel(header_frame, text="Настройки Namecheap API", font=ctk.CTkFont(size=16, weight="bold")).pack(side="left")
+        ctk.CTkButton(header_frame, text="Как получить API?", command=self.show_namecheap_instructions).pack(side="left", padx=10)
+
         self.nc_user_entry = self._create_setting_row(parent, "API User:")
-        self.nc_user_entry.insert(0, self.credentials.get("namecheap_user", ""))
+        self.nc_user_entry.insert(0, self.credentials.get("namecheap_user", "sergeyivanov"))
         self.nc_key_entry = self._create_setting_row(parent, "API Key:")
         self.nc_key_entry.insert(0, self.credentials.get("namecheap_key", ""))
         self.nc_key_entry.configure(show="*")
@@ -925,6 +976,42 @@ class FastPanelApp(ctk.CTk):
         self.nc_ip_entry.insert(0, self.credentials.get("namecheap_ip", ""))
         ctk.CTkButton(ip_frame, text="Получить мой IP", width=120, command=self.fetch_public_ip).pack(side="left", padx=10)
         self._create_save_cancel_buttons(parent, self.save_all_settings)
+
+    def show_namecheap_instructions(self):
+        instruction_text = """
+Как получить API-ключ в Namecheap:
+
+1. Зайди в аккаунт Namecheap: https://ap.www.namecheap.com/
+2. Открой раздел управления профилем:
+   В верхнем меню выбери Profile → Tools → Namecheap API Access 
+   (или сразу перейди по ссылке: https://ap.www.namecheap.com/settings/tools/apiaccess/).
+3. Включи API-доступ:
+   Нажми 'Enable API Access'.
+   Тебе нужно будет указать статический IP-адрес сервера, с которого будут идти запросы (Namecheap принимает только whitelisted IP).
+4. Сгенерируй ключ:
+   API Key генерируется автоматически после активации доступа.
+   Ты его увидишь в разделе API Access (и сможешь сгенерировать новый, если понадобится).
+5. Используй связку:
+   - API Username → это твой логин от Namecheap (например: sergeyivanov)
+   - API Key → сгенерированный ключ.
+   - API IP → IP, который ты добавил в белый список.
+"""
+        InstructionWindow(self, "Инструкция по Namecheap API", instruction_text)
+
+    def show_cloudflare_instructions(self):
+        instruction_text = """
+Как получить глобальный API-ключ в Cloudflare:
+
+1. Зайди в аккаунт: https://dash.cloudflare.com/
+2. В правом верхнем углу нажми на иконку профиля → My Profile.
+3. Перейди во вкладку 'API Tokens'.
+4. Тебе нужен 'Global API Key'.
+5. Для получения глобального ключа:
+   - Нажми 'View' → 'Global API Key'.
+   - Введи пароль от аккаунта.
+   - Ключ появится на экране — сохрани его.
+"""
+        InstructionWindow(self, "Инструкция по Cloudflare API", instruction_text)
 
     def _create_setting_row(self, parent, label_text, return_frame=False):
         row = ctk.CTkFrame(parent, fg_color="transparent")
@@ -955,13 +1042,17 @@ class FastPanelApp(ctk.CTk):
         self.after(0, lambda: (self.nc_ip_entry.delete(0, "end"), self.nc_ip_entry.insert(0, ip)))
 
     def save_all_settings(self):
+        # *** ИЗМЕНЕНИЕ: Сохраняем и E-mail ***
+        self.credentials["cloudflare_email"] = self.cf_email_entry.get()
         self.credentials["cloudflare_token"] = self.cf_token_entry.get()
         self.credentials["namecheap_user"] = self.nc_user_entry.get()
         self.credentials["namecheap_key"] = self.nc_key_entry.get()
         self.credentials["namecheap_ip"] = self.nc_ip_entry.get()
         for key, value in self.credentials.items(): self.db.save_setting(key, value)
+        
         self.app_settings["default_ssl_email"] = self.ssl_email_entry.get()
         for key, value in self.app_settings.items(): self.db.save_setting(key, value)
+        
         self.show_success("Настройки сохранены")
         self.log_action("Настройки приложения сохранены")
 
@@ -969,10 +1060,14 @@ class FastPanelApp(ctk.CTk):
         self.servers = self.db.get_all_servers()
         self.domains = self.db.get_all_domains()
         all_settings = self.db.get_all_settings()
-        cred_keys = ["cloudflare_token", "namecheap_user", "namecheap_key", "namecheap_ip"]
+        
+        # *** ИЗМЕНЕНИЕ: Добавляем 'cloudflare_email' в ключи credentials ***
+        cred_keys = ["cloudflare_token", "cloudflare_email", "namecheap_user", "namecheap_key", "namecheap_ip"]
         self.credentials = {k: v for k, v in all_settings.items() if k in cred_keys}
         self.app_settings = {k: v for k, v in all_settings.items() if k not in cred_keys}
+        
         self.log_action(f"Загружено {len(self.servers)} серверов и {len(self.domains)} доменов из БД.")
+
 
     def show_monitoring_tab(self):
         self.clear_tab_container()
