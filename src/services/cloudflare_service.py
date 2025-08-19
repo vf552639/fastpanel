@@ -11,11 +11,13 @@ logger = get_logger("cloudflare_service")
 class CloudflareService:
     """Service for working with Cloudflare"""
 
-    def __init__(self, api_token: str):
+    def __init__(self, api_token: str, email: str):
         self.api_token = api_token
+        self.email = email
         self.base_url = "https://api.cloudflare.com/client/v4"
         self.headers = {
-            "Authorization": f"Bearer {self.api_token}",
+            "X-Auth-Email": self.email,
+            "X-Auth-Key": self.api_token,
             "Content-Type": "application/json"
         }
 
@@ -30,22 +32,34 @@ class CloudflareService:
             A tuple containing the zone_id and a list of name_servers, or None on error.
         """
         url = f"{self.base_url}/zones"
+        # При использовании Global API Key Cloudflare автоматически определяет аккаунт
         data = {
             "name": domain_name,
-            "account": {"id": self._get_account_id()} # Helper to get account ID
         }
         try:
+            # Получаем ID аккаунта
+            account_id = self._get_account_id()
+            if not account_id:
+                return None
+            data["account"] = {"id": account_id}
+
             response = requests.post(url, headers=self.headers, json=data, timeout=10)
             response.raise_for_status()
             result = response.json()
+
             if result.get("success"):
                 zone_id = result["result"]["id"]
                 name_servers = result["result"]["name_servers"]
                 logger.info(f"Zone {domain_name} created successfully. Zone ID: {zone_id}")
                 return zone_id, name_servers
             else:
-                logger.error(f"Error adding zone {domain_name}: {result['errors'][0]['message']}")
+                # Более детальное логирование ошибки
+                error_message = result.get('errors', [{}])[0].get('message', 'Unknown error')
+                logger.error(f"Error adding zone {domain_name}: {error_message}")
                 return None
+        except requests.exceptions.HTTPError as http_err:
+             logger.error(f"HTTP error occurred while adding zone {domain_name}: {http_err} - {http_err.response.text}")
+             return None
         except requests.RequestException as e:
             logger.error(f"API request failed while adding zone {domain_name}: {e}")
             return None
@@ -74,7 +88,8 @@ class CloudflareService:
                 response.raise_for_status()
                 result = response.json()
                 if not result.get("success"):
-                    logger.error(f"Error creating A-record {record['name']} for zone {zone_id}: {result['errors'][0]['message']}")
+                    error_message = result.get('errors', [{}])[0].get('message', 'Unknown error')
+                    logger.error(f"Error creating A-record {record['name']} for zone {zone_id}: {error_message}")
                     success = False
                 else:
                     logger.info(f"A-record {record['name']} created for zone {zone_id}.")
