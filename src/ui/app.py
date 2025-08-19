@@ -261,7 +261,7 @@ class FastPanelApp(ctk.CTk):
 
         info_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         info_frame.pack(side="bottom", fill="x", padx=20, pady=20)
-        ctk.CTkLabel(info_frame, text="Version 0.3.0", font=ctk.CTkFont(size=10), text_color=("#999999", "#666666")).pack()
+        ctk.CTkLabel(info_frame, text="Version 1.3.0", font=ctk.CTkFont(size=10), text_color=("#999999", "#666666")).pack()
         self.status_label = ctk.CTkLabel(info_frame, text="● Готов к работе", font=ctk.CTkFont(size=11), text_color=("#4caf50", "#4caf50"))
         self.status_label.pack(pady=(5, 0))
 
