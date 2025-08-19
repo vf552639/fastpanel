@@ -182,7 +182,6 @@ class FastPanelService:
                     installation_failed_in_log = True
                     logger.error(f"Обнаружена ошибка в логе установки: {line}")
 
-                # Улучшенная, нечувствительная к регистру проверка
                 if "password:" in line.lower():
                     match = re.search(r'Password:\s*(\S+)', line, re.IGNORECASE)
                     if match:
@@ -193,6 +192,35 @@ class FastPanelService:
 
             self.ssh.execute(f"rm -f {installer_path}")
             report("Очистка временных файлов...", 0.95)
+            
+            report("Шаг 5: Проверка и открытие порта 8888...", 0.9)
+            firewall_managed = False
+            ufw_status = self.ssh.execute("ufw status")
+            if ufw_status.success and "inactive" not in ufw_status.stdout:
+                report("Обнаружен активный UFW. Проверяем порт 8888...", 0.91)
+                port_check = self.ssh.execute("ufw status | grep 8888")
+                if not port_check.success or not port_check.stdout:
+                    self.ssh.execute("ufw insert 1 allow 8888/tcp")
+                    self.ssh.execute("sudo ufw reload")
+                    report("✅ Порт 8888 открыт в UFW и правила перезагружены.", 0.92)
+                else:
+                    report("Порт 8888 уже открыт в UFW.", 0.92)
+                firewall_managed = True
+            
+            firewalld_status = self.ssh.execute("systemctl is-active firewalld")
+            if firewalld_status.success:
+                report("Обнаружен активный firewalld. Проверяем порт 8888...", 0.91)
+                port_check = self.ssh.execute("firewall-cmd --list-ports | grep 8888")
+                if not port_check.success or not port_check.stdout:
+                    self.ssh.execute("firewall-cmd --permanent --add-port=8888/tcp")
+                    self.ssh.execute("firewall-cmd --reload")
+                    report("✅ Порт 8888 открыт в firewalld.", 0.92)
+                else:
+                    report("Порт 8888 уже открыт в firewalld.", 0.92)
+                firewall_managed = True
+
+            if not firewall_managed:
+                report("Активный брандмауэр не обнаружен, проверка порта не требуется.", 0.92)
 
             if exec_result.success and admin_password and not installation_failed_in_log:
                 result.update({
