@@ -1,25 +1,55 @@
 """
 Cloudflare Service - all operations with Cloudflare
 """
-import requests
 from typing import Tuple, Optional, List
+import time
+from cloudflare import Cloudflare, APIStatusError, APIConnectionError
+from cloudflare.types.accounts import Account
 
 from src.utils.logger import get_logger
 
 logger = get_logger("cloudflare_service")
 
 class CloudflareService:
-    """Service for working with Cloudflare"""
+    """Service for working with Cloudflare using the official library"""
 
     def __init__(self, api_token: str, email: str):
-        self.api_token = api_token
-        self.email = email
-        self.base_url = "https://api.cloudflare.com/client/v4"
-        self.headers = {
-            "X-Auth-Email": self.email,
-            "X-Auth-Key": self.api_token,
-            "Content-Type": "application/json"
-        }
+        """Initializes the Cloudflare client."""
+        if not api_token or not email:
+            raise ValueError("API Token and Email are required for CloudflareService.")
+            
+        # Инициализация клиента с вашими учетными данными.
+        # max_retries=3 означает, что библиотека сама попробует повторить запрос 3 раза
+        # с нарастающей задержкой в случае сбоя (например, при ошибках 429, >500).
+        self.client = Cloudflare(api_key=api_token, api_email=email, max_retries=3)
+        self.account_id = None
+
+    def _get_account_id(self) -> Optional[str]:
+        """Helper function to get the first account ID."""
+        if self.account_id:
+            return self.account_id
+        try:
+            # ИЗМЕНЕНО: Корректная обработка итерируемого объекта
+            # Метод .list() возвращает специальный объект для постраничной навигации.
+            accounts_page = self.client.accounts.list()
+            # Пытаемся получить первый элемент из него.
+            first_account: Optional[Account] = next(iter(accounts_page), None)
+
+            if first_account:
+                self.account_id = first_account.id
+                logger.info(f"Successfully retrieved Cloudflare Account ID: {self.account_id}")
+                return self.account_id
+            else:
+                logger.error("Could not retrieve Cloudflare Account ID. No accounts found.")
+                return None
+                
+        except APIStatusError as e:
+            logger.error(f"Cloudflare API error while getting account ID: {e.status_code} - {e.response.text}")
+            return None
+        except APIConnectionError as e:
+            logger.error(f"Connection error while getting account ID: {e.__cause__}")
+            return None
+
 
     def add_zone(self, domain_name: str) -> Optional[Tuple[str, List[str]]]:
         """
@@ -31,35 +61,37 @@ class CloudflareService:
         Returns:
             A tuple containing the zone_id and a list of name_servers, or None on error.
         """
-        url = f"{self.base_url}/zones"
-        data = {
-            "name": domain_name,
-        }
-        try:
-            account_id = self._get_account_id()
-            if not account_id:
-                return None
-            data["account"] = {"id": account_id}
-
-            response = requests.post(url, headers=self.headers, json=data, timeout=10)
-            response.raise_for_status()
-            result = response.json()
-
-            if result.get("success"):
-                zone_id = result["result"]["id"]
-                name_servers = result["result"]["name_servers"]
-                logger.info(f"Zone {domain_name} created successfully. Zone ID: {zone_id}")
-                return zone_id, name_servers
-            else:
-                error_message = result.get('errors', [{}])[0].get('message', 'Unknown error')
-                logger.error(f"Error adding zone {domain_name}: {error_message}")
-                return None
-        except requests.exceptions.HTTPError as http_err:
-             logger.error(f"HTTP error occurred while adding zone {domain_name}: {http_err} - {http_err.response.text}")
-             return None
-        except requests.RequestException as e:
-            logger.error(f"API request failed while adding zone {domain_name}: {e}")
+        account_id = self._get_account_id()
+        if not account_id:
             return None
+
+        try:
+            zone = self.client.zones.create(
+                name=domain_name,
+                account={"id": account_id}
+            )
+            # Небольшая задержка после создания зоны, чтобы дать API время на "подготовку"
+            time.sleep(3)
+            logger.info(f"Zone {domain_name} created successfully. Zone ID: {zone.id}")
+            return zone.id, zone.name_servers
+        except APIStatusError as e:
+            # Обработка ошибки, если зона уже существует
+            if any("already exists" in error.get("message", "") for error in e.body.get('errors', [])):
+                logger.warning(f"Zone {domain_name} already exists. Attempting to fetch its info.")
+                try:
+                    zones = self.client.zones.list(name=domain_name)
+                    if zones:
+                        zone_info = next(iter(zones), None)
+                        if zone_info:
+                            return zone_info.id, zone_info.name_servers
+                except APIStatusError as e_fetch:
+                     logger.error(f"Failed to fetch existing zone {domain_name}: {e_fetch.status_code} - {e_fetch.response.text}")
+            logger.error(f"Cloudflare API error while adding zone {domain_name}: {e.status_code} - {e.response.text}")
+            return None
+        except APIConnectionError as e:
+            logger.error(f"Connection error while adding zone {domain_name}: {e.__cause__}")
+            return None
+
 
     def create_a_records(self, zone_id: str, ip_address: str) -> int:
         """
@@ -72,48 +104,37 @@ class CloudflareService:
         Returns:
             The number of successfully created records (0 to 3).
         """
-        # ИЗМЕНЕНО: Проверка IP-адреса перед отправкой запроса
         if not ip_address or not (ip_address.replace('.', '').isdigit()):
             logger.error(f"Invalid IP address provided for zone {zone_id}: '{ip_address}'")
             return 0
-
-        url = f"{self.base_url}/zones/{zone_id}/dns_records"
+            
         records_to_create = [
-            # Запись для '@' теперь использует имя зоны, как рекомендует Cloudflare
-            {"type": "A", "name": "@", "content": ip_address, "proxied": True},
-            {"type": "A", "name": "www", "content": ip_address, "proxied": True},
-            {"type": "A", "name": "*", "content": ip_address, "proxied": True},
+            {"type": "A", "name": "@", "content": ip_address, "proxied": True, "ttl": 1},
+            {"type": "A", "name": "www", "content": ip_address, "proxied": True, "ttl": 1},
+            {"type": "A", "name": "*", "content": ip_address, "proxied": True, "ttl": 1},
         ]
         
-        # ИЗМЕНЕНО: Логика для подсчета успешных операций
         successful_creations = 0
         for record in records_to_create:
             try:
-                response = requests.post(url, headers=self.headers, json=record, timeout=10)
-                response.raise_for_status()
-                result = response.json()
-                if result.get("success"):
-                    logger.info(f"A-record '{record['name']}' created for zone {zone_id}.")
+                self.client.dns.records.create(
+                    zone_id=zone_id,
+                    type=record["type"],
+                    name=record["name"],
+                    content=record["content"],
+                    proxied=record["proxied"],
+                    ttl=record["ttl"]
+                )
+                logger.info(f"A-record '{record['name']}' created for zone {zone_id}.")
+                successful_creations += 1
+            except APIStatusError as e:
+                # Игнорируем ошибку, если запись уже существует
+                if any("already exists" in error.get("message", "") for error in e.body.get('errors', [])):
+                    logger.warning(f"A-record '{record['name']}' for zone {zone_id} already exists. Skipping.")
                     successful_creations += 1
                 else:
-                    error_message = result.get('errors', [{}])[0].get('message', 'Unknown error')
-                    # Логируем ошибку только для конкретной записи
-                    logger.error(f"Error creating A-record '{record['name']}' for zone {zone_id}: {error_message}")
-            except requests.RequestException as e:
-                logger.error(f"API request failed while creating A-record '{record['name']}' for zone {zone_id}: {e}")
-        
-        return successful_creations
+                    logger.error(f"Failed to create A-record '{record['name']}' for zone {zone_id}: {e.status_code} - {e.response.text}")
+            except APIConnectionError as e:
+                logger.error(f"Connection error while creating A-record '{record['name']}': {e.__cause__}")
 
-    def _get_account_id(self) -> Optional[str]:
-        """Helper function to get the first account ID."""
-        try:
-            response = requests.get(f"{self.base_url}/accounts", headers=self.headers, timeout=10)
-            response.raise_for_status()
-            result = response.json()
-            if result.get("success") and result["result"]:
-                return result["result"][0]["id"]
-            logger.error("Could not retrieve Cloudflare Account ID.")
-            return None
-        except requests.RequestException as e:
-            logger.error(f"API request failed while getting account ID: {e}")
-            return None
+        return successful_creations
