@@ -14,7 +14,7 @@ class NamecheapService:
         self.api_user = api_user
         self.api_key = api_key
         self.client_ip = client_ip
-        # ИЗМЕНЕНО: URL изменен на рабочий (production)
+        # URL для рабочего (production) окружения
         self.base_url = "https://api.namecheap.com/xml.response"
 
 
@@ -43,10 +43,13 @@ class NamecheapService:
         try:
             response = requests.get(self.base_url, params=params, timeout=20)
             response.raise_for_status()
-            # Более надежная проверка на ошибку в XML
-            if '<Error' in response.text and 'Number="0"' not in response.text:
+            
+            # ИЗМЕНЕНО: Более надежная проверка на ошибку.
+            # Мы проверяем, что статус в XML-ответе НЕ "OK".
+            if 'Status="OK"' not in response.text:
                 logger.error(f"Namecheap API error for {domain_name}: {response.text}")
                 return False
+                
             logger.info(f"Successfully updated nameservers for {domain_name} at Namecheap.")
             return True
         except requests.RequestException as e:
