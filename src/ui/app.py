@@ -6,7 +6,7 @@ import customtkinter as ctk
 from typing import Optional, Dict, List
 import json
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 import threading
 from PIL import Image
 import os
@@ -20,6 +20,7 @@ from functools import partial
 from src.services.cloudflare_service import CloudflareService
 from src.services.namecheap_service import NamecheapService
 from src.core.database_manager import DatabaseManager
+import time
 
 
 # Настройка внешнего вида
@@ -214,6 +215,8 @@ class FastPanelApp(ctk.CTk):
         self.installation_states = {}
         self.domain_widgets = {}
         self.selected_domains = set()
+        self.server_metrics = {}
+        self.server_statuses = {}
 
         self.app_settings = {}
         self.credentials = {}
@@ -233,6 +236,9 @@ class FastPanelApp(ctk.CTk):
         # Используем виртуальное событие <<Paste>> которое не зависит от раскладки
         self.bind_class("CTkEntry", "<<Paste>>", self.handle_paste)
         self.bind_class("CTkTextbox", "<<Paste>>", self.handle_paste)
+
+        self.check_server_renewals()
+        self.start_monitoring()
 
     ## ИЗМЕНЕНО: Обработчик вставки
     def handle_paste(self, event):
@@ -292,8 +298,12 @@ class FastPanelApp(ctk.CTk):
             ("📋", "Результат", self.show_result_tab),
         ]
 
+        self.nav_buttons = {}
         for icon, text, command in nav_buttons:
-            ctk.CTkButton(self.sidebar, text=f"{icon}  {text}", font=ctk.CTkFont(size=14), height=40, fg_color="transparent", text_color=("#000000", "#ffffff"), hover_color=("#e0e0e0", "#404040"), anchor="w", command=command).pack(fill="x", padx=15, pady=2)
+            btn = ctk.CTkButton(self.sidebar, text=f"{icon}  {text}", font=ctk.CTkFont(size=14), height=40, fg_color="transparent", text_color=("#000000", "#ffffff"), hover_color=("#e0e0e0", "#404040"), anchor="w", command=command)
+            btn.pack(fill="x", padx=15, pady=2)
+            self.nav_buttons[text] = btn
+
 
         info_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         info_frame.pack(side="bottom", fill="x", padx=20, pady=20)
@@ -362,7 +372,8 @@ class FastPanelApp(ctk.CTk):
                 "ip": ip,
                 "ssh_user": self.server_user_entry.get() or "root",
                 "password": self.server_password_entry.get(),
-                "created_at": datetime.now().strftime("%Y-%m-%d")
+                "created_at": datetime.now().strftime("%Y-%m-%d"),
+                "hosting_period_days": int(self.hosting_period_entry.get() or 30)
             }
             if not payload["name"] or not payload["ip"]:
                 self.show_error("Имя и IP обязательны")
@@ -372,6 +383,7 @@ class FastPanelApp(ctk.CTk):
                 "name": self.existing_server_name_entry.get(),
                 "admin_url": self.server_url_entry.get(),
                 "admin_password": self.fastuser_password_entry.get(),
+                 "hosting_period_days": int(self.existing_hosting_period_entry.get() or 30)
             }
             if not payload["admin_url"] or not payload["admin_password"]:
                 self.show_error("URL и пароль обязательны")
@@ -419,11 +431,28 @@ class FastPanelApp(ctk.CTk):
         self.show_domain_tab()
 
     def delete_domain_from_server(self, domain, server_data):
-        self.db.delete_domain(domain['domain_name'])
-        self.log_action(f"Домен {domain['domain_name']} удален с сервера {server_data['name']}", level="WARNING")
-        self.show_success(f"Домен {domain['domain_name']} удален")
-        self.refresh_data()
-        self.after(100, lambda: self.show_server_management(server_data))
+        confirm_dialog = ctk.CTkToplevel(self)
+        confirm_dialog.title("Подтверждение")
+        confirm_dialog.geometry("350x150")
+        confirm_dialog.transient(self)
+        confirm_dialog.grab_set()
+
+        ctk.CTkLabel(confirm_dialog, text=f"Удалить сайт {domain['domain_name']}?", font=ctk.CTkFont(size=14)).pack(pady=20)
+        
+        btn_frame = ctk.CTkFrame(confirm_dialog, fg_color="transparent")
+        btn_frame.pack(pady=10)
+
+        def do_delete():
+            confirm_dialog.destroy()
+            self.db.delete_domain(domain['domain_name'])
+            self.log_action(f"Домен {domain['domain_name']} удален с сервера {server_data['name']}", level="WARNING")
+            self.show_success(f"Домен {domain['domain_name']} удален")
+            self.refresh_data()
+            self.after(100, lambda: self.show_server_management(server_data))
+
+        ctk.CTkButton(btn_frame, text="Отмена", command=confirm_dialog.destroy).pack(side="left", padx=10)
+        ctk.CTkButton(btn_frame, text="Удалить", fg_color="red", command=do_delete).pack(side="left", padx=10)
+
 
     def start_installation(self, server_data):
         server_id = server_data.get("id")
@@ -436,6 +465,7 @@ class FastPanelApp(ctk.CTk):
             self.show_error("Пароль SSH не найден для этого сервера.")
             return
 
+        self.server_statuses[server_id] = "installing"
         self.log_action(f"Запуск установки FastPanel на сервер '{server_data['name']}'")
         self.installation_states[server_id] = {"installing": True, "log": [], "progress": 0.0, "card": None, "log_window": None}
         self._update_server_list()
@@ -459,6 +489,7 @@ class FastPanelApp(ctk.CTk):
         self.after(0, self._on_installation_finished, result, server_data, server_id)
 
     def _on_installation_finished(self, result, server_data, server_id):
+        self.server_statuses[server_id] = "idle"
         if server_id in self.installation_states: self.installation_states[server_id]["installing"] = False
         if result['success']:
             self.show_success(f"FastPanel на '{server_data['name']}' успешно установлен!")
@@ -475,8 +506,10 @@ class FastPanelApp(ctk.CTk):
 
     def refresh_data(self):
         self.load_data_from_db()
+        self.check_server_renewals()
         if self.current_tab == "servers": self.show_servers_tab()
         elif self.current_tab == "domain": self.show_domain_tab()
+        elif self.current_tab == "monitoring": self.show_monitoring_tab()
         self.log_action("Данные обновлены")
         self.show_success("Данные обновлены")
 
@@ -534,12 +567,10 @@ class FastPanelApp(ctk.CTk):
         self.server_password_entry = ctk.CTkEntry(parent, width=400, height=40, show="*")
         self.server_password_entry.pack(pady=(0, 15), fill="x", expand=True)
         if data: self.server_password_entry.insert(0, data.get("password", ""))
-        ctk.CTkLabel(parent, text="Дата добавления", font=ctk.CTkFont(size=12), anchor="w").pack(fill="x", pady=(0, 5))
-        self.server_created_at_entry = ctk.CTkEntry(parent, width=400, height=40)
-        self.server_created_at_entry.pack(pady=(0, 15), fill="x", expand=True)
-        date_str = data.get("created_at", "") if data else ""
-        if not date_str: date_str = datetime.now().strftime("%Y-%m-%d")
-        self.server_created_at_entry.insert(0, date_str.split(" ")[0])
+        ctk.CTkLabel(parent, text="Срок аренды (дней)", font=ctk.CTkFont(size=12), anchor="w").pack(fill="x", pady=(0, 5))
+        self.hosting_period_entry = ctk.CTkEntry(parent, width=400, height=40)
+        self.hosting_period_entry.pack(pady=(0, 15), fill="x", expand=True)
+        self.hosting_period_entry.insert(0, str(data.get("hosting_period_days", 30)) if data else "30")
 
     def create_existing_server_form(self, parent, data=None):
         ctk.CTkLabel(parent, text="Имя сервера", font=ctk.CTkFont(size=12), anchor="w").pack(fill="x", pady=(0, 5))
@@ -554,12 +585,10 @@ class FastPanelApp(ctk.CTk):
         self.fastuser_password_entry = ctk.CTkEntry(parent, width=400, height=40, show="*")
         self.fastuser_password_entry.pack(pady=(0, 15), fill="x", expand=True)
         if data: self.fastuser_password_entry.insert(0, data.get("admin_password", ""))
-        ctk.CTkLabel(parent, text="Дата добавления", font=ctk.CTkFont(size=12), anchor="w").pack(fill="x", pady=(0, 5))
-        self.existing_server_created_at_entry = ctk.CTkEntry(parent, width=400, height=40)
-        self.existing_server_created_at_entry.pack(pady=(0, 15), fill="x", expand=True)
-        date_str = data.get("created_at", "") if data else ""
-        if not date_str: date_str = datetime.now().strftime("%Y-%m-%d")
-        self.existing_server_created_at_entry.insert(0, date_str.split(" ")[0])
+        ctk.CTkLabel(parent, text="Срок аренды (дней)", font=ctk.CTkFont(size=12), anchor="w").pack(fill="x", pady=(0, 5))
+        self.existing_hosting_period_entry = ctk.CTkEntry(parent, width=400, height=40)
+        self.existing_hosting_period_entry.pack(pady=(0, 15), fill="x", expand=True)
+        self.existing_hosting_period_entry.insert(0, str(data.get("hosting_period_days", 30)) if data else "30")
 
     def show_domain_tab(self):
         self.clear_tab_container()
@@ -584,7 +613,7 @@ class FastPanelApp(ctk.CTk):
             ctk.CTkLabel(domain_list_frame, text="Нет добавленных доменов").pack(pady=20)
         else:
             for domain_info in self.domains: self.add_domain_row(domain_list_frame, domain_info)
-    
+
     def confirm_delete_selected_domains(self):
         dialog = ctk.CTkToplevel(self)
         dialog.title("Подтверждение удаления")
@@ -658,13 +687,21 @@ class FastPanelApp(ctk.CTk):
         for name, props in visible_columns_config.items():
             domain_frame.grid_columnconfigure(col_index, weight=props['weight'], minsize=props['min'])
             col_index += 1
-        domain_frame.grid_columnconfigure(col_index, weight=0, minsize=40)
+        domain_frame.grid_columnconfigure(col_index + 1, weight=0, minsize=40) # for edit button
+        domain_frame.grid_columnconfigure(col_index + 2, weight=0, minsize=40) # for delete button
+
         var = ctk.BooleanVar()
         checkbox = ctk.CTkCheckBox(domain_frame, text="", variable=var, command=lambda d=domain: self.toggle_domain_selection(d, var))
         checkbox.grid(row=0, column=0, padx=10, sticky="w")
         current_col = 1
-        ctk.CTkLabel(domain_frame, text=f"🌐 {domain}", font=ctk.CTkFont(size=14), anchor="w").grid(row=0, column=current_col, padx=10, sticky="w")
+
+        domain_entry = ctk.CTkEntry(domain_frame, font=ctk.CTkFont(size=14))
+        domain_entry.insert(0, domain)
+        # FIX: Use the parent frame's color instead of "transparent"
+        domain_entry.configure(state="readonly", border_width=0, fg_color=domain_frame.cget("fg_color"))
+        domain_entry.grid(row=0, column=current_col, padx=5, sticky="w")
         current_col += 1
+
         server_ips = ["(Не выбран)"] + [s['ip'] for s in self.servers if s.get('ip')]
         server_ip_value = "(Не выбран)"
         if domain_info.get("server_id"):
@@ -674,36 +711,128 @@ class FastPanelApp(ctk.CTk):
         server_menu = ctk.CTkOptionMenu(domain_frame, values=server_ips, variable=server_var, width=150, command=lambda ip, d=domain: self.update_domain_server(d, ip))
         server_menu.grid(row=0, column=current_col, padx=10, sticky="w")
         current_col += 1
+
         status_colors = { "none": ("#666666", "#aaaaaa"), "pending": ("#ff9800", "#f57c00"), "active": ("#4caf50", "#2e7d32"), "error": ("#f44336", "#d32f2f") }
         status_text = { "none": "⚪ Не привязан", "pending": "🟡 В процессе...", "active": "🟢 Активен", "error": "🔴 Ошибка" }
         status = domain_info.get("cloudflare_status", "none")
         status_label = ctk.CTkLabel(domain_frame, text=status_text.get(status), text_color=status_colors.get(status), anchor="w")
         status_label.grid(row=0, column=current_col, padx=10, sticky="w")
         current_col += 1
+
         if self.all_columns["NS-серверы Cloudflare"]["visible"]:
             ns_servers = domain_info.get("cloudflare_ns", "")
             ns_label = ctk.CTkLabel(domain_frame, text=ns_servers, anchor="w", wraplength=300, justify="left")
             ns_label.grid(row=0, column=current_col, padx=10, sticky="ew")
             current_col += 1
+
         ftp_button = ctk.CTkButton(domain_frame, text="🖥️ FTP", width=60, command=lambda d=domain_info: self.show_ftp_credentials_dialog(d))
         ftp_button.grid(row=0, column=current_col, padx=10)
         if not domain_info.get("ftp_user"): ftp_button.configure(state="disabled")
         current_col += 1
-        ssl_frame = ctk.CTkFrame(domain_frame, fg_color="transparent")
-        ssl_frame.grid(row=0, column=current_col, padx=10, sticky="ew")
-        ssl_status_colors = {"none": ("#666666", "#aaaaaa"), "pending": ("#ff9800", "#f57c00"), "active": ("#4caf50", "#2e7d32"), "error": ("#f44336", "#d32f2f")}
-        ssl_status_text = {"none": "⚪ Нет", "pending": "🟡 Выпускается...", "active": "🟢 Активен", "error": "🔴 Ошибка"}
+
         ssl_status = domain_info.get("ssl_status", "none")
-        ssl_status_label = ctk.CTkLabel(ssl_frame, text=ssl_status_text.get(ssl_status), text_color=ssl_status_colors.get(ssl_status))
-        ssl_status_label.pack(side="left", padx=(0, 5))
-        ssl_issue_button = ctk.CTkButton(ssl_frame, text="Выпустить", width=90, height=24, font=ctk.CTkFont(size=11), command=lambda d=domain_info: self.start_ssl_issuance(d))
-        ssl_issue_button.pack(side="left")
-        if not domain_info.get("server_id") or ssl_status == "pending": ssl_issue_button.configure(state="disabled")
+        ssl_button = ctk.CTkButton(domain_frame, height=24, font=ctk.CTkFont(size=11))
+        
+        if ssl_status == "active":
+            ssl_button.configure(text="Активен", fg_color="green", command=lambda d=domain_info: self.start_ssl_issuance(d))
+        elif ssl_status == "pending":
+            ssl_button.configure(text="Выпускается...", state="disabled")
+        elif ssl_status == "error":
+            ssl_button.configure(text="Ошибка", fg_color="red", command=lambda d=domain_info: self.start_ssl_issuance(d))
+        else:
+            ssl_button.configure(text="Выпустить", command=lambda d=domain_info: self.start_ssl_issuance(d))
+        
+        ssl_button.grid(row=0, column=current_col, padx=10)
+        if not domain_info.get("server_id"): ssl_button.configure(state="disabled")
+
         current_col += 1
+
+        edit_button = ctk.CTkButton(domain_frame, text="✏️", width=30, command=lambda d=domain_info: self.show_edit_domain_dialog(d))
+        edit_button.grid(row=0, column=current_col, padx=(10, 5), sticky="e")
+
         delete_button = ctk.CTkButton(domain_frame, text="🗑️", width=30, fg_color=("#f44336", "#d32f2f"), hover_color=("#da190b", "#b71c1c"), command=lambda d=domain_info: self.delete_domain(d))
-        delete_button.grid(row=0, column=current_col, padx=10, sticky="e")
-        self.domain_widgets[domain] = {"frame": domain_frame, "status_label": status_label, "ssl_status_label": ssl_status_label, "ssl_issue_button": ssl_issue_button}
+        delete_button.grid(row=0, column=current_col + 1, padx=(0, 10), sticky="e")
+        
+        self.domain_widgets[domain] = {"frame": domain_frame, "status_label": status_label, "ssl_button": ssl_button}
         if self.all_columns["NS-серверы Cloudflare"]["visible"]: self.domain_widgets[domain]["ns_label"] = ns_label
+
+    def show_edit_domain_dialog(self, domain_info):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title(f"Редактировать: {domain_info['domain_name']}")
+        dialog.geometry("500x600")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ctk.CTkLabel(dialog, text=f"Редактирование {domain_info['domain_name']}", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=20)
+
+        def create_row(parent, label_text):
+            row = ctk.CTkFrame(parent, fg_color="transparent")
+            row.pack(fill="x", padx=20, pady=8)
+            ctk.CTkLabel(row, text=label_text, width=150, anchor="w").pack(side="left")
+            return row
+
+        # Server
+        server_row = create_row(dialog, "Сервер:")
+        server_ips = ["(Не выбран)"] + [s['ip'] for s in self.servers if s.get('ip')]
+        server_ip_value = "(Не выбран)"
+        if domain_info.get("server_id"):
+            server = next((s for s in self.servers if s['id'] == domain_info.get("server_id")), None)
+            if server: server_ip_value = server['ip']
+        server_var = ctk.StringVar(value=server_ip_value)
+        server_menu = ctk.CTkOptionMenu(server_row, values=server_ips, variable=server_var, width=250)
+        server_menu.pack(side="left")
+        
+        # Purchase Date
+        purchase_date_row = create_row(dialog, "Дата покупки:")
+        purchase_date_entry = ctk.CTkEntry(purchase_date_row, width=250)
+        purchase_date_entry.insert(0, domain_info.get("purchase_date", ""))
+        purchase_date_entry.pack(side="left")
+        
+        # Registrar
+        registrar_row = create_row(dialog, "Регистратор:")
+        registrar_entry = ctk.CTkEntry(registrar_row, width=250)
+        registrar_entry.insert(0, domain_info.get("registrar", ""))
+        registrar_entry.pack(side="left")
+
+        # Backup
+        backup_row = create_row(dialog, "Резервное копирование:")
+        backup_enabled_var = ctk.BooleanVar(value=domain_info.get("backup_enabled", False))
+        backup_checkbox = ctk.CTkCheckBox(backup_row, text="Включить", variable=backup_enabled_var)
+        backup_checkbox.pack(side="left", padx=(0, 10))
+
+        backup_freq_var = ctk.StringVar(value=domain_info.get("backup_frequency", "еженедельно"))
+        backup_freq_menu = ctk.CTkOptionMenu(backup_row, values=["ежедневно", "еженедельно", "ежемесячно"], variable=backup_freq_var)
+        backup_freq_menu.pack(side="left")
+        
+        # Notes
+        notes_row = create_row(dialog, "Комментарий:")
+        notes_text = ctk.CTkTextbox(dialog, height=100)
+        notes_text.insert("1.0", domain_info.get("notes", ""))
+        notes_text.pack(fill="x", padx=20, pady=5)
+        
+        def save_changes():
+            selected_server = next((s for s in self.servers if s['ip'] == server_var.get()), None)
+            updated_data = {
+                "server_id": selected_server['id'] if selected_server else None,
+                "purchase_date": purchase_date_entry.get(),
+                "registrar": registrar_entry.get(),
+                "backup_enabled": backup_enabled_var.get(),
+                "backup_frequency": backup_freq_var.get(),
+                "notes": notes_text.get("1.0", "end-1c"),
+            }
+            # Auto-calculate renewal date if purchase date is provided
+            try:
+                purchase_dt = datetime.strptime(updated_data["purchase_date"], "%Y-%m-%d")
+                updated_data["renewal_date"] = (purchase_dt + timedelta(days=365)).strftime("%Y-%m-%d")
+            except ValueError:
+                updated_data["renewal_date"] = ""
+
+            self.db.update_domain(domain_info['domain_name'], updated_data)
+            self.refresh_data()
+            dialog.destroy()
+        
+        ctk.CTkButton(dialog, text="Сохранить", command=save_changes).pack(pady=20)
+
 
     def show_ftp_credentials_dialog(self, domain_info):
         server_ip = "N/A"
@@ -848,12 +977,21 @@ class FastPanelApp(ctk.CTk):
                 if d["domain_name"] == domain_name: d["ssl_status"] = status; break
             if domain_name in self.domain_widgets:
                 widgets = self.domain_widgets[domain_name]
-                status_colors = {"none": ("#666666", "#aaaaaa"), "pending": ("#ff9800", "#f57c00"), "active": ("#4caf50", "#2e7d32"), "error": ("#f44336", "#d32f2f")}
-                status_text = {"none": "⚪ Нет", "pending": "🟡 Выпускается...", "active": "🟢 Активен", "error": "🔴 Ошибка"}
-                widgets["ssl_status_label"].configure(text=status_text.get(status), text_color=status_colors.get(status))
-                if status == "pending": widgets["ssl_issue_button"].configure(state="disabled")
-                else: widgets["ssl_issue_button"].configure(state="normal")
+                ssl_button = widgets["ssl_button"]
+                
+                if status == "active":
+                    ssl_button.configure(text="Активен", fg_color="green", command=lambda d=domain_name: self.start_ssl_issuance(self.get_domain_info(d)))
+                elif status == "pending":
+                    ssl_button.configure(text="Выпускается...", state="disabled")
+                elif status == "error":
+                    ssl_button.configure(text="Ошибка", fg_color="red", command=lambda d=domain_name: self.start_ssl_issuance(self.get_domain_info(d)))
+                else:
+                    ssl_button.configure(text="Выпустить", command=lambda d=domain_name: self.start_ssl_issuance(self.get_domain_info(d)))
+
         self.after(0, _update)
+    
+    def get_domain_info(self, domain_name):
+        return next((d for d in self.domains if d['domain_name'] == domain_name), None)
 
     def update_domain_status_ui(self, domain, status, ns_servers=None):
         def _update():
@@ -892,19 +1030,31 @@ class FastPanelApp(ctk.CTk):
         ctk.CTkButton(dialog, text="Сохранить", command=lambda: self.add_domains(domain_textbox.get("1.0", "end-1c"), server_var.get(), dialog)).pack(pady=20)
 
     def add_domains(self, domains_text, server_ip, dialog):
+        dialog.destroy() # Close dialog immediately to provide user feedback
         domains = [d.strip() for d in domains_text.split("\n") if d.strip()]
+        if not domains:
+            return
+
         server = next((s for s in self.servers if s['ip'] == server_ip), None)
         server_id_to_save = server['id'] if server else None
+        
         added_count = 0
+        existing_domains = []
         for domain in domains:
             domain_data = {"domain_name": domain, "server_id": server_id_to_save}
             if self.db.add_domain(domain_data):
-                self.domains.append(self.db.get_all_domains()[-1])
                 added_count += 1
+            else:
+                existing_domains.append(domain)
+
         if added_count > 0:
-            self.log_action(f"Добавлено {added_count} доменов")
-            self.show_domain_tab()
-        dialog.destroy()
+            self.log_action(f"Добавлено {added_count} новых доменов.")
+            self.show_success(f"Добавлено {added_count} доменов.")
+            self.refresh_data() # This is the key change: reload all data from DB
+        
+        if existing_domains:
+            self.show_error(f"Домены уже существуют: {', '.join(existing_domains)}")
+
 
     def show_result_tab(self):
         self.clear_tab_container()
@@ -1058,6 +1208,8 @@ class FastPanelApp(ctk.CTk):
 
     def load_data_from_db(self):
         self.servers = self.db.get_all_servers()
+        for server in self.servers:
+            self.server_statuses[server['id']] = "idle" # Initialize all servers as idle
         self.domains = self.db.get_all_domains()
         all_settings = self.db.get_all_settings()
         
@@ -1071,9 +1223,109 @@ class FastPanelApp(ctk.CTk):
 
     def show_monitoring_tab(self):
         self.clear_tab_container()
-        self.page_title.configure(text="Мониторинг")
+        self.page_title.configure(text="Мониторинг серверов")
         self.current_tab = "monitoring"
-        ctk.CTkLabel(self.tab_container, text="Вкладка мониторинга", font=("Arial", 24)).pack(pady=20)
+        
+        scroll_frame = ctk.CTkScrollableFrame(self.tab_container, fg_color="transparent")
+        scroll_frame.pack(fill="both", expand=True)
+
+        if not self.servers:
+            ctk.CTkLabel(scroll_frame, text="Нет серверов для мониторинга").pack(pady=50)
+            return
+        
+        self.monitoring_cards = {}
+        for i, server in enumerate(self.servers):
+            card = ctk.CTkFrame(scroll_frame, corner_radius=10, border_width=1)
+            card.pack(fill="x", pady=5, padx=5)
+            
+            header = ctk.CTkFrame(card, fg_color="transparent")
+            header.pack(fill="x", padx=15, pady=10)
+            ctk.CTkLabel(header, text=f"🖥️ {server['name']} ({server['ip']})", font=ctk.CTkFont(size=14, weight="bold")).pack(side="left")
+
+            metrics_frame = ctk.CTkFrame(card, fg_color="transparent")
+            metrics_frame.pack(fill="x", padx=15, pady=10)
+            metrics_frame.grid_columnconfigure((0,1,2), weight=1)
+
+            def create_metric(parent, name, row, col):
+                frame = ctk.CTkFrame(parent, fg_color="transparent")
+                frame.grid(row=row, column=col, sticky="ew", padx=10)
+                label = ctk.CTkLabel(frame, text=f"{name}: 0%", font=ctk.CTkFont(size=12))
+                label.pack()
+                progress = ctk.CTkProgressBar(frame)
+                progress.set(0)
+                progress.pack(fill="x")
+                return label, progress
+            
+            cpu_label, cpu_progress = create_metric(metrics_frame, "CPU", 0, 0)
+            ram_label, ram_progress = create_metric(metrics_frame, "RAM", 0, 1)
+            disk_label, disk_progress = create_metric(metrics_frame, "Disk", 0, 2)
+
+            self.monitoring_cards[server['id']] = {
+                "card": card, "cpu_label": cpu_label, "cpu_progress": cpu_progress,
+                "ram_label": ram_label, "ram_progress": ram_progress,
+                "disk_label": disk_label, "disk_progress": disk_progress
+            }
+        
+        self.update_monitoring_ui()
+
+    def update_monitoring_ui(self):
+        if self.current_tab != "monitoring":
+            return
+            
+        for server_id, metrics in self.server_metrics.items():
+            if server_id in self.monitoring_cards:
+                card_widgets = self.monitoring_cards[server_id]
+                
+                cpu = metrics.get('cpu', 0)
+                ram = metrics.get('ram', 0)
+                disk = metrics.get('disk', 0)
+                
+                card_widgets['cpu_label'].configure(text=f"CPU: {cpu}%")
+                card_widgets['cpu_progress'].set(cpu / 100)
+                card_widgets['ram_label'].configure(text=f"RAM: {ram}%")
+                card_widgets['ram_progress'].set(ram / 100)
+                card_widgets['disk_label'].configure(text=f"Disk: {disk}%")
+                card_widgets['disk_progress'].set(disk / 100)
+
+                if cpu > 90 or ram > 90 or disk > 90:
+                    card_widgets['card'].configure(border_color="red")
+                else:
+                    card_widgets['card'].configure(border_color=("#e0e0e0", "#404040"))
+
+    def start_monitoring(self):
+        monitor_thread = threading.Thread(target=self._monitoring_loop, daemon=True)
+        monitor_thread.start()
+
+    def _monitoring_loop(self):
+        while True:
+            for server in self.servers:
+                server_id = server['id']
+                if self.server_statuses.get(server_id) != "idle":
+                    self.log_action(f"Мониторинг сервера {server['name']} пропущен (статус: {self.server_statuses.get(server_id)})", "DEBUG")
+                    continue
+
+                if not server.get('password'): continue
+
+                self.server_statuses[server_id] = "monitoring"
+                ssh = SSHManager()
+                if ssh.connect(server['ip'], server.get('ssh_user', 'root'), server.get('password')):
+                    # CPU
+                    cpu_result = ssh.execute("top -bn1 | grep 'Cpu(s)' | sed 's/.*, *\\([0-9.]*\\)%* id.*/\\1/' | awk '{print 100 - $1}'")
+                    # RAM
+                    ram_result = ssh.execute("free | grep Mem | awk '{print $3/$2 * 100.0}'")
+                    # Disk
+                    disk_result = ssh.execute("df -h / | tail -n 1 | awk '{print $5}' | sed 's/%//'")
+                    
+                    self.server_metrics[server_id] = {
+                        'cpu': float(cpu_result.stdout.strip()) if cpu_result.success else 0,
+                        'ram': float(ram_result.stdout.strip()) if ram_result.success else 0,
+                        'disk': int(disk_result.stdout.strip()) if disk_result.success else 0,
+                    }
+                    ssh.disconnect()
+                self.server_statuses[server_id] = "idle"
+            
+            self.after(0, self.update_monitoring_ui)
+            time.sleep(3600) # 1 hour
 
     def show_logs_tab(self, level_filter="Все"):
         self.clear_tab_container()
@@ -1273,8 +1525,30 @@ class FastPanelApp(ctk.CTk):
         self.status_label.configure(text=f"❌ {message}", text_color=("#f44336", "#f44336"))
         self.log_action(message, level="ERROR")
         self.after(3000, lambda: self.status_label.configure(text="● Готов к работе", text_color=("#4caf50", "#4caf50")))
+    
+    def check_server_renewals(self):
+        expiring_servers = 0
+        today = datetime.now()
+        for server in self.servers:
+            try:
+                created_at = datetime.strptime(server['created_at'].split("T")[0], "%Y-%m-%d")
+                period = timedelta(days=int(server.get('hosting_period_days', 30)))
+                renewal_date = created_at + period
+                if (renewal_date - today).days <= 3:
+                    expiring_servers += 1
+            except (ValueError, TypeError):
+                continue
+        
+        btn = self.nav_buttons["Серверы"]
+        if expiring_servers > 0:
+            btn.configure(text=f"🖥️ Серверы 🔔({expiring_servers})")
+        else:
+            btn.configure(text="🖥️ Серверы")
+
 
     def start_automation(self, server_data):
+        server_id = server_data['id']
+        self.server_statuses[server_id] = "automating"
         self.log_action(f"Запуск автоматизации для сервера '{server_data['name']}'")
         self.show_success(f"Автоматизация для '{server_data['name']}' запущена...")
         server_domains = [d for d in self.domains if d.get("server_id") == server_data.get("id")]
@@ -1286,6 +1560,7 @@ class FastPanelApp(ctk.CTk):
         automation_thread.start()
 
     def _run_automation_in_thread(self, server_data, domains_to_process, progress_window):
+        server_id = server_data['id']
         def progress_callback(message):
             self.after(0, progress_window.add_log, message)
             self.log_action(message)
@@ -1294,7 +1569,9 @@ class FastPanelApp(ctk.CTk):
         if not service.ssh.connect(server_data['ip'], server_data.get('ssh_user', 'root'), server_data.get('password')):
             progress_callback(f"КРИТИЧЕСКАЯ ОШИБКА: Не удалось подключиться к серверу {server_data['ip']}.")
             self.log_action(f"SSH-соединение не установлено для {server_data['name']}", "ERROR")
-            self.after(0, progress_window.destroy); return
+            self.after(0, progress_window.destroy)
+            self.server_statuses[server_id] = "idle"
+            return
         progress_callback("SSH-соединение успешно установлено.")
         for domain_info in domains_to_process:
             progress_callback(f"--- Начало работы с доменом: {domain_info['domain_name']} ---")
@@ -1306,6 +1583,7 @@ class FastPanelApp(ctk.CTk):
         service.ssh.disconnect()
         progress_callback("--- Автоматизация завершена ---")
         self.log_action(f"Автоматизация для сервера '{server_data['name']}' завершена.", "SUCCESS")
+        self.server_statuses[server_id] = "idle"
         self.after(5000, progress_window.destroy)
 
     def _update_domain_data(self, updated_domain_info):
