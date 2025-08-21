@@ -45,7 +45,8 @@ class DatabaseManager:
                 admin_url TEXT,
                 admin_password TEXT,
                 created_at TEXT NOT NULL,
-                install_date TEXT
+                install_date TEXT,
+                hosting_period_days INTEGER DEFAULT 30
             )
             """)
 
@@ -62,6 +63,12 @@ class DatabaseManager:
                 site_user TEXT,
                 path TEXT,
                 ssl_status TEXT,
+                purchase_date TEXT,
+                renewal_date TEXT,
+                registrar TEXT,
+                backup_enabled INTEGER DEFAULT 0,
+                backup_frequency TEXT,
+                notes TEXT,
                 FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE SET NULL
             )
             """)
@@ -150,16 +157,16 @@ class DatabaseManager:
         """Добавляет новый сервер в БД."""
         try:
             # Убедимся, что все поля существуют, иначе None
-            keys = ['id', 'name', 'ip', 'ssh_user', 'password', 'fastpanel_installed', 'admin_url', 'admin_password', 'created_at']
+            keys = ['id', 'name', 'ip', 'ssh_user', 'password', 'fastpanel_installed', 'admin_url', 'admin_password', 'created_at', 'hosting_period_days']
             for key in keys:
                 server_data.setdefault(key, None)
-            
+
             # Конвертируем bool в int для fastpanel_installed
             server_data['fastpanel_installed'] = 1 if server_data.get('fastpanel_installed') else 0
 
             self.cursor.execute("""
-                INSERT INTO servers (id, name, ip, ssh_user, password, fastpanel_installed, admin_url, admin_password, created_at)
-                VALUES (:id, :name, :ip, :ssh_user, :password, :fastpanel_installed, :admin_url, :admin_password, :created_at)
+                INSERT INTO servers (id, name, ip, ssh_user, password, fastpanel_installed, admin_url, admin_password, created_at, hosting_period_days)
+                VALUES (:id, :name, :ip, :ssh_user, :password, :fastpanel_installed, :admin_url, :admin_password, :created_at, :hosting_period_days)
             """, server_data)
             self.conn.commit()
             return True
@@ -204,7 +211,7 @@ class DatabaseManager:
         """Добавляет новый домен."""
         try:
             # Убедимся, что все поля существуют, иначе None
-            keys = ['domain_name', 'server_id', 'ftp_user', 'ftp_password', 'cloudflare_status', 'cloudflare_ns']
+            keys = ['domain_name', 'server_id', 'ftp_user', 'ftp_password', 'cloudflare_status', 'cloudflare_ns', 'purchase_date', 'renewal_date', 'registrar', 'backup_enabled', 'backup_frequency', 'notes']
             for key in keys:
                 domain_data.setdefault(key, None)
 
@@ -212,8 +219,8 @@ class DatabaseManager:
                  domain_data['cloudflare_ns'] = ",".join(domain_data.get('cloudflare_ns'))
 
             self.cursor.execute("""
-                INSERT INTO domains (domain_name, server_id, ftp_user, ftp_password, cloudflare_status, cloudflare_ns)
-                VALUES (:domain_name, :server_id, :ftp_user, :ftp_password, :cloudflare_status, :cloudflare_ns)
+                INSERT INTO domains (domain_name, server_id, ftp_user, ftp_password, cloudflare_status, cloudflare_ns, purchase_date, renewal_date, registrar, backup_enabled, backup_frequency, notes)
+                VALUES (:domain_name, :server_id, :ftp_user, :ftp_password, :cloudflare_status, :cloudflare_ns, :purchase_date, :renewal_date, :registrar, :backup_enabled, :backup_frequency, :notes)
             """, domain_data)
             self.conn.commit()
             return True
