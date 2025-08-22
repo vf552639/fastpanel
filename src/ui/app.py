@@ -648,16 +648,17 @@ class FastPanelApp(ctk.CTk):
             widget.destroy()
         
         # Обновленная конфигурация колонок с правильными весами и выравниванием
+        column_visibility = self.app_settings.get('column_visibility', {})
         self.all_columns = {
             "Домен": {"weight": 3, "min": 200, "visible": True, "anchor": "center"},
             "Сервер": {"weight": 2, "min": 180, "visible": True, "anchor": "center"},
             "Статус Cloudflare": {"weight": 2, "min": 160, "visible": True, "anchor": "center"},
-            "NS-серверы Cloudflare": {"weight": 3, "min": 250, "visible": self.app_settings.get('column_visibility', {}).get("NS-серверы Cloudflare", True), "anchor": "center"},
-            "FTP": {"weight": 1, "min": 80, "visible": True, "anchor": "center"},
-            "SSL": {"weight": 1, "min": 120, "visible": True, "anchor": "center"},
-            "Действия": {"weight": 1, "min": 100, "visible": True, "anchor": "center"}  # Новая колонка для кнопок
+            "NS-серверы Cloudflare": {"weight": 3, "min": 250, "visible": column_visibility.get("NS-серверы Cloudflare", False), "anchor": "center"},
+            "FTP": {"weight": 1, "min": 80, "visible": column_visibility.get("FTP", False), "anchor": "center"},
+            "SSL": {"weight": 1, "min": 120, "visible": column_visibility.get("SSL", False), "anchor": "center"},
+            "Действия": {"weight": 1, "min": 100, "visible": True, "anchor": "center"}
         }
-        
+
         # Чекбокс колонка
         self.domain_header.grid_columnconfigure(0, weight=0, minsize=40)
         
@@ -676,9 +677,9 @@ class FastPanelApp(ctk.CTk):
         dialog.transient(self)
         dialog.grab_set()
         ctk.CTkLabel(dialog, text="Выберите видимые колонки", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=15)
-        togglable_columns = ["NS-серверы Cloudflare"]
+        togglable_columns = ["NS-серверы Cloudflare", "FTP", "SSL"]
         for col_name in togglable_columns:
-            var = ctk.BooleanVar(value=self.app_settings.get('column_visibility', {}).get(col_name, True))
+            var = ctk.BooleanVar(value=self.app_settings.get('column_visibility', {}).get(col_name, False))
             cb = ctk.CTkCheckBox(dialog, text=col_name, variable=var, command=lambda name=col_name, v=var: self.toggle_column_visibility(name, v))
             cb.pack(pady=5, padx=20, anchor="w")
         ctk.CTkButton(dialog, text="Закрыть", command=dialog.destroy).pack(pady=20)
@@ -714,53 +715,56 @@ class FastPanelApp(ctk.CTk):
         current_col = 1
         
         # Домен (центрированный)
-        domain_label = ctk.CTkLabel(domain_frame, text=domain, font=ctk.CTkFont(size=13), anchor="center")
-        domain_label.grid(row=0, column=current_col, padx=5, pady=8, sticky="ew")
-        current_col += 1
+        if self.all_columns["Домен"]["visible"]:
+            domain_label = ctk.CTkLabel(domain_frame, text=domain, font=ctk.CTkFont(size=13), anchor="center")
+            domain_label.grid(row=0, column=current_col, padx=5, pady=8, sticky="ew")
+            current_col += 1
         
         # Сервер
-        server_ips = ["(Не выбран)"] + [s['ip'] for s in self.servers if s.get('ip')]
-        server_ip_value = "(Не выбран)"
-        if domain_info.get("server_id"):
-            server = next((s for s in self.servers if s['id'] == domain_info.get("server_id")), None)
-            if server: 
-                server_ip_value = server['ip']
-        
-        server_var = ctk.StringVar(value=server_ip_value)
-        server_menu = ctk.CTkOptionMenu(
-            domain_frame, 
-            values=server_ips, 
-            variable=server_var, 
-            width=150,
-            anchor="center",
-            command=lambda ip, d=domain: self.update_domain_server(d, ip)
-        )
-        server_menu.grid(row=0, column=current_col, padx=5, pady=8, sticky="ew")
-        current_col += 1
+        if self.all_columns["Сервер"]["visible"]:
+            server_ips = ["(Не выбран)"] + [s['ip'] for s in self.servers if s.get('ip')]
+            server_ip_value = "(Не выбран)"
+            if domain_info.get("server_id"):
+                server = next((s for s in self.servers if s['id'] == domain_info.get("server_id")), None)
+                if server: 
+                    server_ip_value = server['ip']
+            
+            server_var = ctk.StringVar(value=server_ip_value)
+            server_menu = ctk.CTkOptionMenu(
+                domain_frame, 
+                values=server_ips, 
+                variable=server_var, 
+                width=150,
+                anchor="center",
+                command=lambda ip, d=domain: self.update_domain_server(d, ip)
+            )
+            server_menu.grid(row=0, column=current_col, padx=5, pady=8, sticky="ew")
+            current_col += 1
         
         # Статус Cloudflare
-        status_colors = {
-            "none": ("#666666", "#aaaaaa"),
-            "pending": ("#ff9800", "#f57c00"),
-            "active": ("#4caf50", "#2e7d32"),
-            "error": ("#f44336", "#d32f2f")
-        }
-        status_text = {
-            "none": "⚪ Не привязан",
-            "pending": "🟡 В процессе...",
-            "active": "🟢 Активен",
-            "error": "🔴 Ошибка"
-        }
-        status = domain_info.get("cloudflare_status", "none")
-        status_label = ctk.CTkLabel(
-            domain_frame,
-            text=status_text.get(status),
-            text_color=status_colors.get(status),
-            anchor="center",
-            font=ctk.CTkFont(size=12)
-        )
-        status_label.grid(row=0, column=current_col, padx=5, pady=8, sticky="ew")
-        current_col += 1
+        if self.all_columns["Статус Cloudflare"]["visible"]:
+            status_colors = {
+                "none": ("#666666", "#aaaaaa"),
+                "pending": ("#ff9800", "#f57c00"),
+                "active": ("#4caf50", "#2e7d32"),
+                "error": ("#f44336", "#d32f2f")
+            }
+            status_text = {
+                "none": "⚪ Не привязан",
+                "pending": "🟡 В процессе...",
+                "active": "🟢 Активен",
+                "error": "🔴 Ошибка"
+            }
+            status = domain_info.get("cloudflare_status", "none")
+            status_label = ctk.CTkLabel(
+                domain_frame,
+                text=status_text.get(status),
+                text_color=status_colors.get(status),
+                anchor="center",
+                font=ctk.CTkFont(size=12)
+            )
+            status_label.grid(row=0, column=current_col, padx=5, pady=8, sticky="ew")
+            current_col += 1
         
         # NS-серверы Cloudflare (если видимы)
         if self.all_columns["NS-серверы Cloudflare"]["visible"]:
@@ -777,75 +781,80 @@ class FastPanelApp(ctk.CTk):
             current_col += 1
         
         # FTP кнопка
-        ftp_button = ctk.CTkButton(
-            domain_frame,
-            text="🖥️ FTP",
-            width=70,
-            height=28,
-            font=ctk.CTkFont(size=11),
-            command=lambda d=domain_info: self.show_ftp_credentials_dialog(d)
-        )
-        ftp_button.grid(row=0, column=current_col, padx=5, pady=8)
-        if not domain_info.get("ftp_user"):
-            ftp_button.configure(state="disabled")
-        current_col += 1
+        if self.all_columns["FTP"]["visible"]:
+            ftp_button = ctk.CTkButton(
+                domain_frame,
+                text="🖥️ FTP",
+                width=70,
+                height=28,
+                font=ctk.CTkFont(size=11),
+                command=lambda d=domain_info: self.show_ftp_credentials_dialog(d)
+            )
+            ftp_button.grid(row=0, column=current_col, padx=5, pady=8)
+            if not domain_info.get("ftp_user"):
+                ftp_button.configure(state="disabled")
+            current_col += 1
         
         # SSL кнопка
-        ssl_status = domain_info.get("ssl_status", "none")
-        ssl_button = ctk.CTkButton(domain_frame, height=28, font=ctk.CTkFont(size=11))
-        
-        if ssl_status == "active":
-            ssl_button.configure(text="✅ Активен", fg_color="green", width=100, command=lambda d=domain_info: self.start_ssl_issuance(d))
-        elif ssl_status == "pending":
-            ssl_button.configure(text="⏳ Выпускается", state="disabled", width=100)
-        elif ssl_status == "error":
-            ssl_button.configure(text="❌ Ошибка", fg_color="red", width=100, command=lambda d=domain_info: self.start_ssl_issuance(d))
-        else:
-            ssl_button.configure(text="Выпустить", width=100, command=lambda d=domain_info: self.start_ssl_issuance(d))
-        
-        ssl_button.grid(row=0, column=current_col, padx=5, pady=8)
-        if not domain_info.get("server_id"):
-            ssl_button.configure(state="disabled")
-        current_col += 1
+        if self.all_columns["SSL"]["visible"]:
+            ssl_status = domain_info.get("ssl_status", "none")
+            ssl_button = ctk.CTkButton(domain_frame, height=28, font=ctk.CTkFont(size=11))
+            
+            if ssl_status == "active":
+                ssl_button.configure(text="✅ Активен", fg_color="green", width=100, command=lambda d=domain_info: self.start_ssl_issuance(d))
+            elif ssl_status == "pending":
+                ssl_button.configure(text="⏳ Выпускается", state="disabled", width=100)
+            elif ssl_status == "error":
+                ssl_button.configure(text="❌ Ошибка", fg_color="red", width=100, command=lambda d=domain_info: self.start_ssl_issuance(d))
+            else:
+                ssl_button.configure(text="Выпустить", width=100, command=lambda d=domain_info: self.start_ssl_issuance(d))
+            
+            ssl_button.grid(row=0, column=current_col, padx=5, pady=8)
+            if not domain_info.get("server_id"):
+                ssl_button.configure(state="disabled")
+            current_col += 1
         
         # Действия (редактирование и удаление в одной колонке)
-        actions_frame = ctk.CTkFrame(domain_frame, fg_color="transparent")
-        actions_frame.grid(row=0, column=current_col, padx=5, pady=8, sticky="ew")
-        
-        # Центрируем кнопки в колонке действий
-        actions_frame.grid_columnconfigure(0, weight=1)
-        actions_frame.grid_columnconfigure(1, weight=0)
-        actions_frame.grid_columnconfigure(2, weight=0)
-        actions_frame.grid_columnconfigure(3, weight=1)
-        
-        edit_button = ctk.CTkButton(
-            actions_frame,
-            text="✏️",
-            width=30,
-            height=28,
-            font=ctk.CTkFont(size=12),
-            command=lambda d=domain_info: self.show_edit_domain_dialog(d)
-        )
-        edit_button.grid(row=0, column=1, padx=2)
-        
-        delete_button = ctk.CTkButton(
-            actions_frame,
-            text="🗑️",
-            width=30,
-            height=28,
-            font=ctk.CTkFont(size=12),
-            fg_color=("#f44336", "#d32f2f"),
-            hover_color=("#da190b", "#b71c1c"),
-            command=lambda d=domain_info: self.delete_domain(d)
-        )
-        delete_button.grid(row=0, column=2, padx=2)
+        if self.all_columns["Действия"]["visible"]:
+            actions_frame = ctk.CTkFrame(domain_frame, fg_color="transparent")
+            actions_frame.grid(row=0, column=current_col, padx=5, pady=8, sticky="ew")
+            
+            # Центрируем кнопки в колонке действий
+            actions_frame.grid_columnconfigure(0, weight=1)
+            actions_frame.grid_columnconfigure(1, weight=0)
+            actions_frame.grid_columnconfigure(2, weight=0)
+            actions_frame.grid_columnconfigure(3, weight=1)
+            
+            edit_button = ctk.CTkButton(
+                actions_frame,
+                text="✏️",
+                width=30,
+                height=28,
+                font=ctk.CTkFont(size=12),
+                command=lambda d=domain_info: self.show_edit_domain_dialog(d)
+            )
+            edit_button.grid(row=0, column=1, padx=2)
+            
+            delete_button = ctk.CTkButton(
+                actions_frame,
+                text="🗑️",
+                width=30,
+                height=28,
+                font=ctk.CTkFont(size=12),
+                fg_color=("#f44336", "#d32f2f"),
+                hover_color=("#da190b", "#b71c1c"),
+                command=lambda d=domain_info: self.delete_domain(d)
+            )
+            delete_button.grid(row=0, column=2, padx=2)
         
         # Сохраняем ссылки на виджеты для обновления
         self.domain_widgets[domain] = {
-            "frame": domain_frame,
-            "status_label": status_label,
-            "ssl_button": ssl_button
+            "frame": domain_frame
         }
+        if self.all_columns["Статус Cloudflare"]["visible"]:
+            self.domain_widgets[domain]["status_label"] = status_label
+        if self.all_columns["SSL"]["visible"]:
+            self.domain_widgets[domain]["ssl_button"] = ssl_button
         if self.all_columns["NS-серверы Cloudflare"]["visible"]:
             self.domain_widgets[domain]["ns_label"] = ns_label
             
@@ -1123,7 +1132,7 @@ class FastPanelApp(ctk.CTk):
             self.db.update_domain(domain_name, {"ssl_status": status})
             for d in self.domains:
                 if d["domain_name"] == domain_name: d["ssl_status"] = status; break
-            if domain_name in self.domain_widgets:
+            if domain_name in self.domain_widgets and "ssl_button" in self.domain_widgets[domain_name]:
                 widgets = self.domain_widgets[domain_name]
                 ssl_button = widgets["ssl_button"]
                 
@@ -1153,9 +1162,10 @@ class FastPanelApp(ctk.CTk):
                     break
             if domain in self.domain_widgets:
                 widget_refs = self.domain_widgets[domain]
-                status_colors = { "none": ("#666666", "#aaaaaa"), "pending": ("#ff9800", "#f57c00"), "active": ("#4caf50", "#2e7d32"), "error": ("#f44336", "#d32f2f") }
-                status_text = { "none": "⚪ Не привязан", "pending": "🟡 В процессе...", "active": "🟢 Активен", "error": "🔴 Ошибка" }
-                widget_refs["status_label"].configure(text=status_text.get(status), text_color=status_colors.get(status))
+                if "status_label" in widget_refs:
+                    status_colors = { "none": ("#666666", "#aaaaaa"), "pending": ("#ff9800", "#f57c00"), "active": ("#4caf50", "#2e7d32"), "error": ("#f44336", "#d32f2f") }
+                    status_text = { "none": "⚪ Не привязан", "pending": "🟡 В процессе...", "active": "🟢 Активен", "error": "🔴 Ошибка" }
+                    widget_refs["status_label"].configure(text=status_text.get(status), text_color=status_colors.get(status))
                 if ns_servers and "ns_label" in widget_refs: widget_refs["ns_label"].configure(text=", ".join(ns_servers))
                 widget_refs["frame"].update_idletasks()
         self.after(0, _update)
