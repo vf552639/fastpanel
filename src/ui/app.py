@@ -852,12 +852,12 @@ class FastPanelApp(ctk.CTk):
     def show_edit_domain_dialog(self, domain_info):
         dialog = ctk.CTkToplevel(self)
         dialog.title(f"Редактировать: {domain_info['domain_name']}")
-        dialog.geometry("600x650") # Increased height for new fields
+        dialog.geometry("600x750")  # Increased height for new fields
         dialog.transient(self)
         dialog.grab_set()
 
         ctk.CTkLabel(dialog, text=f"Редактирование {domain_info['domain_name']}", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=20)
-        
+
         scroll_frame = ctk.CTkScrollableFrame(dialog, fg_color="transparent")
         scroll_frame.pack(fill="both", expand=True)
 
@@ -873,24 +873,25 @@ class FastPanelApp(ctk.CTk):
         server_ip_value = "(Не выбран)"
         if domain_info.get("server_id"):
             server = next((s for s in self.servers if s['id'] == domain_info.get("server_id")), None)
-            if server: server_ip_value = server['ip']
+            if server:
+                server_ip_value = server['ip']
         server_var = ctk.StringVar(value=server_ip_value)
         server_menu = ctk.CTkOptionMenu(server_row, values=server_ips, variable=server_var, width=250)
         server_menu.pack(side="left")
-        
+
         # Purchase Date
         purchase_date_row = create_row(scroll_frame, "Дата покупки (ГГГГ-ММ-ДД):")
         purchase_date_entry = ctk.CTkEntry(purchase_date_row, width=250)
         # FIX: Ensure value is a string to prevent TclError
         purchase_date_entry.insert(0, str(domain_info.get("purchase_date") or ""))
         purchase_date_entry.pack(side="left")
-        
+
         # Registrar
         registrar_row = create_row(scroll_frame, "Регистратор:")
         registrar_entry = ctk.CTkEntry(registrar_row, width=250)
         registrar_entry.insert(0, str(domain_info.get("registrar") or ""))
         registrar_entry.pack(side="left")
-        
+
         # WordPress
         wp_row = create_row(scroll_frame, "WordPress:")
         wp_installed_var = ctk.BooleanVar(value=domain_info.get("wordpress_installed", False))
@@ -915,21 +916,48 @@ class FastPanelApp(ctk.CTk):
         ns_info_label = ctk.CTkLabel(ns_row, text=str(domain_info.get("cloudflare_ns") or "Не заданы"), anchor="w")
         ns_info_label.pack(side="left")
 
+        # NEW: FTP URL
+        ftp_url_row = create_row(scroll_frame, "FTP URL:")
+        server_ip_for_ftp = server_ip_value if server_ip_value != "(Не выбран)" else ""
+        ftp_url_label = ctk.CTkLabel(ftp_url_row, text=f"ftp://{server_ip_for_ftp}" if server_ip_for_ftp else "Сервер не выбран", anchor="w")
+        ftp_url_label.pack(side="left")
+
         # FTP Info
         ftp_user_row = create_row(scroll_frame, "FTP Логин:")
         ftp_user_label = ctk.CTkLabel(ftp_user_row, text=str(domain_info.get("ftp_user") or "Нет"), anchor="w")
         ftp_user_label.pack(side="left")
-        
+
         ftp_pass_row = create_row(scroll_frame, "FTP Пароль:")
         ftp_pass_label = ctk.CTkLabel(ftp_pass_row, text=str(domain_info.get("ftp_password") or "Нет"), anchor="w")
         ftp_pass_label.pack(side="left")
         
+        # NEW: SSL Status and Action
+        ssl_row = create_row(scroll_frame, "SSL Сертификат:")
+        ssl_status_frame = ctk.CTkFrame(ssl_row, fg_color="transparent")
+        ssl_status_frame.pack(side="left")
+
+        ssl_status = domain_info.get("ssl_status", "none")
+        ssl_button = ctk.CTkButton(ssl_status_frame, height=28, font=ctk.CTkFont(size=11))
+        
+        if ssl_status == "active":
+            ssl_button.configure(text="✅ Активен", fg_color="green", width=120, command=lambda d=domain_info: self.start_ssl_issuance(d))
+        elif ssl_status == "pending":
+            ssl_button.configure(text="⏳ Выпускается", state="disabled", width=120)
+        elif ssl_status == "error":
+            ssl_button.configure(text="❌ Ошибка", fg_color="red", width=120, command=lambda d=domain_info: self.start_ssl_issuance(d))
+        else:
+            ssl_button.configure(text="Выпустить сертификат", width=150, command=lambda d=domain_info: self.start_ssl_issuance(d))
+        
+        ssl_button.pack(side="left")
+        if not domain_info.get("server_id"):
+            ssl_button.configure(state="disabled")
+
         # Notes
         notes_row = create_row(scroll_frame, "Комментарий:")
         notes_text = ctk.CTkTextbox(scroll_frame, height=100)
         notes_text.insert("1.0", domain_info.get("notes", ""))
         notes_text.pack(fill="x", padx=20, pady=5)
-        
+
         def save_changes():
             selected_server = next((s for s in self.servers if s['ip'] == server_var.get()), None)
             updated_data = {
@@ -951,9 +979,8 @@ class FastPanelApp(ctk.CTk):
             self.db.update_domain(domain_info['domain_name'], updated_data)
             self.refresh_data()
             dialog.destroy()
-        
-        ctk.CTkButton(dialog, text="Сохранить", command=save_changes).pack(pady=20)
 
+        ctk.CTkButton(dialog, text="Сохранить", command=save_changes).pack(pady=20)
 
     def show_ftp_credentials_dialog(self, domain_info):
         server_ip = "N/A"
