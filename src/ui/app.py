@@ -759,20 +759,23 @@ class FastPanelApp(ctk.CTk):
     def show_edit_domain_dialog(self, domain_info):
         dialog = ctk.CTkToplevel(self)
         dialog.title(f"Редактировать: {domain_info['domain_name']}")
-        dialog.geometry("500x600")
+        dialog.geometry("600x650") # Increased height for new fields
         dialog.transient(self)
         dialog.grab_set()
 
         ctk.CTkLabel(dialog, text=f"Редактирование {domain_info['domain_name']}", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=20)
+        
+        scroll_frame = ctk.CTkScrollableFrame(dialog, fg_color="transparent")
+        scroll_frame.pack(fill="both", expand=True)
 
         def create_row(parent, label_text):
             row = ctk.CTkFrame(parent, fg_color="transparent")
             row.pack(fill="x", padx=20, pady=8)
-            ctk.CTkLabel(row, text=label_text, width=150, anchor="w").pack(side="left")
+            ctk.CTkLabel(row, text=label_text, width=180, anchor="w").pack(side="left")
             return row
 
         # Server
-        server_row = create_row(dialog, "Сервер:")
+        server_row = create_row(scroll_frame, "Сервер:")
         server_ips = ["(Не выбран)"] + [s['ip'] for s in self.servers if s.get('ip')]
         server_ip_value = "(Не выбран)"
         if domain_info.get("server_id"):
@@ -783,19 +786,26 @@ class FastPanelApp(ctk.CTk):
         server_menu.pack(side="left")
         
         # Purchase Date
-        purchase_date_row = create_row(dialog, "Дата покупки:")
+        purchase_date_row = create_row(scroll_frame, "Дата покупки (ГГГГ-ММ-ДД):")
         purchase_date_entry = ctk.CTkEntry(purchase_date_row, width=250)
-        purchase_date_entry.insert(0, domain_info.get("purchase_date", ""))
+        # FIX: Ensure value is a string to prevent TclError
+        purchase_date_entry.insert(0, str(domain_info.get("purchase_date") or ""))
         purchase_date_entry.pack(side="left")
         
         # Registrar
-        registrar_row = create_row(dialog, "Регистратор:")
+        registrar_row = create_row(scroll_frame, "Регистратор:")
         registrar_entry = ctk.CTkEntry(registrar_row, width=250)
-        registrar_entry.insert(0, domain_info.get("registrar", ""))
+        registrar_entry.insert(0, str(domain_info.get("registrar") or ""))
         registrar_entry.pack(side="left")
+        
+        # WordPress
+        wp_row = create_row(scroll_frame, "WordPress:")
+        wp_installed_var = ctk.BooleanVar(value=domain_info.get("wordpress_installed", False))
+        wp_checkbox = ctk.CTkCheckBox(wp_row, text="Установить WordPress (заглушка)", variable=wp_installed_var)
+        wp_checkbox.pack(side="left")
 
         # Backup
-        backup_row = create_row(dialog, "Резервное копирование:")
+        backup_row = create_row(scroll_frame, "Резервное копирование:")
         backup_enabled_var = ctk.BooleanVar(value=domain_info.get("backup_enabled", False))
         backup_checkbox = ctk.CTkCheckBox(backup_row, text="Включить", variable=backup_enabled_var)
         backup_checkbox.pack(side="left", padx=(0, 10))
@@ -803,10 +813,27 @@ class FastPanelApp(ctk.CTk):
         backup_freq_var = ctk.StringVar(value=domain_info.get("backup_frequency", "еженедельно"))
         backup_freq_menu = ctk.CTkOptionMenu(backup_row, values=["ежедневно", "еженедельно", "ежемесячно"], variable=backup_freq_var)
         backup_freq_menu.pack(side="left")
+
+        ctk.CTkFrame(scroll_frame, height=1, fg_color=("#e0e0e0", "#404040")).pack(fill="x", padx=20, pady=15)
+        ctk.CTkLabel(scroll_frame, text="Информационные поля", font=ctk.CTkFont(size=14, weight="bold")).pack(padx=20, anchor="w")
+
+        # NS Servers Info
+        ns_row = create_row(scroll_frame, "NS-серверы:")
+        ns_info_label = ctk.CTkLabel(ns_row, text=str(domain_info.get("cloudflare_ns") or "Не заданы"), anchor="w")
+        ns_info_label.pack(side="left")
+
+        # FTP Info
+        ftp_user_row = create_row(scroll_frame, "FTP Логин:")
+        ftp_user_label = ctk.CTkLabel(ftp_user_row, text=str(domain_info.get("ftp_user") or "Нет"), anchor="w")
+        ftp_user_label.pack(side="left")
+        
+        ftp_pass_row = create_row(scroll_frame, "FTP Пароль:")
+        ftp_pass_label = ctk.CTkLabel(ftp_pass_row, text=str(domain_info.get("ftp_password") or "Нет"), anchor="w")
+        ftp_pass_label.pack(side="left")
         
         # Notes
-        notes_row = create_row(dialog, "Комментарий:")
-        notes_text = ctk.CTkTextbox(dialog, height=100)
+        notes_row = create_row(scroll_frame, "Комментарий:")
+        notes_text = ctk.CTkTextbox(scroll_frame, height=100)
         notes_text.insert("1.0", domain_info.get("notes", ""))
         notes_text.pack(fill="x", padx=20, pady=5)
         
@@ -816,6 +843,7 @@ class FastPanelApp(ctk.CTk):
                 "server_id": selected_server['id'] if selected_server else None,
                 "purchase_date": purchase_date_entry.get(),
                 "registrar": registrar_entry.get(),
+                "wordpress_installed": wp_installed_var.get(),
                 "backup_enabled": backup_enabled_var.get(),
                 "backup_frequency": backup_freq_var.get(),
                 "notes": notes_text.get("1.0", "end-1c"),
@@ -1041,7 +1069,12 @@ class FastPanelApp(ctk.CTk):
         added_count = 0
         existing_domains = []
         for domain in domains:
-            domain_data = {"domain_name": domain, "server_id": server_id_to_save}
+            # Set default purchase date to today
+            domain_data = {
+                "domain_name": domain, 
+                "server_id": server_id_to_save,
+                "purchase_date": datetime.now().strftime("%Y-%m-%d")
+            }
             if self.db.add_domain(domain_data):
                 added_count += 1
             else:
