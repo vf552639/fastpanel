@@ -69,6 +69,7 @@ class DatabaseManager:
                 backup_enabled INTEGER DEFAULT 0,
                 backup_frequency TEXT,
                 notes TEXT,
+                wordpress_installed INTEGER DEFAULT 0,
                 FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE SET NULL
             )
             """)
@@ -211,7 +212,7 @@ class DatabaseManager:
         """Добавляет новый домен."""
         try:
             # Убедимся, что все поля существуют, иначе None
-            keys = ['domain_name', 'server_id', 'ftp_user', 'ftp_password', 'cloudflare_status', 'cloudflare_ns', 'purchase_date', 'renewal_date', 'registrar', 'backup_enabled', 'backup_frequency', 'notes']
+            keys = ['domain_name', 'server_id', 'ftp_user', 'ftp_password', 'cloudflare_status', 'cloudflare_ns', 'purchase_date', 'renewal_date', 'registrar', 'backup_enabled', 'backup_frequency', 'notes', 'wordpress_installed']
             for key in keys:
                 domain_data.setdefault(key, None)
 
@@ -219,8 +220,8 @@ class DatabaseManager:
                  domain_data['cloudflare_ns'] = ",".join(domain_data.get('cloudflare_ns'))
 
             self.cursor.execute("""
-                INSERT INTO domains (domain_name, server_id, ftp_user, ftp_password, cloudflare_status, cloudflare_ns, purchase_date, renewal_date, registrar, backup_enabled, backup_frequency, notes)
-                VALUES (:domain_name, :server_id, :ftp_user, :ftp_password, :cloudflare_status, :cloudflare_ns, :purchase_date, :renewal_date, :registrar, :backup_enabled, :backup_frequency, :notes)
+                INSERT INTO domains (domain_name, server_id, ftp_user, ftp_password, cloudflare_status, cloudflare_ns, purchase_date, renewal_date, registrar, backup_enabled, backup_frequency, notes, wordpress_installed)
+                VALUES (:domain_name, :server_id, :ftp_user, :ftp_password, :cloudflare_status, :cloudflare_ns, :purchase_date, :renewal_date, :registrar, :backup_enabled, :backup_frequency, :notes, :wordpress_installed)
             """, domain_data)
             self.conn.commit()
             return True
