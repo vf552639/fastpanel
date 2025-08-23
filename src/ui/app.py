@@ -222,6 +222,9 @@ class FastPanelApp(ctk.CTk):
 
         self.app_settings = {}
         self.credentials = {}
+        
+        # Для массового добавления
+        self.bulk_add_widgets = {}
 
         self.load_data_from_db()
 
@@ -1755,170 +1758,224 @@ class FastPanelApp(ctk.CTk):
         self.page_title.configure(text="Массовое добавление")
         self.current_tab = "bulk_add"
 
+        tab_view = ctk.CTkTabview(self.tab_container, fg_color=("#ffffff", "#2b2b2b"))
+        tab_view.pack(fill="both", expand=True, padx=20, pady=10)
+        
+        new_server_tab = tab_view.add("Новые серверы")
+        existing_fp_tab = tab_view.add("Существующие FastPanel")
+
+        self._create_bulk_add_sub_tab(new_server_tab, "new_server")
+        self._create_bulk_add_sub_tab(existing_fp_tab, "existing_fp")
+
+    def _create_bulk_add_sub_tab(self, parent, import_type):
+        self.bulk_add_widgets[import_type] = {}
+        
         # Блок 1: Загрузка файла и инструкции
-        upload_frame = ctk.CTkFrame(self.tab_container)
+        upload_frame = ctk.CTkFrame(parent)
         upload_frame.pack(fill="x", pady=10)
 
         ctk.CTkLabel(upload_frame, text="Загрузка файла с данными", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=10)
-        ctk.CTkButton(upload_frame, text="Выбрать файл (.csv, .xlsx)", command=self._select_file).pack(pady=10)
+        ctk.CTkButton(upload_frame, text="Выбрать файл (.csv, .xlsx)", command=lambda: self._select_file(import_type)).pack(pady=10)
+        
+        self.bulk_add_widgets[import_type]['skip_header_var'] = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(upload_frame, text="Первая строка содержит заголовки", variable=self.bulk_add_widgets[import_type]['skip_header_var']).pack(pady=5)
 
-        instruction_text = """
-        Инструкция по формату файла:
-        Подготовьте файл в формате CSV или XLSX. Данные должны быть организованы по колонкам:
-        - Колонка A (Обязательная): Имена доменов (например, example.com).
-        - Колонка B (Обязательная): IP-адреса серверов (например, 192.168.1.1).
-        - Колонка C (Необязательная): Пользовательские имена для серверов.
-        """
+
+        if import_type == "new_server":
+            instruction_text = """
+            Инструкция для новых серверов:
+            - Колонка A: Имя домена (например, example.com)
+            - Колонка B: IP-адрес сервера (например, 192.168.1.1)
+            - Колонка C: Логин SSH (например, root)
+            - Колонка D: Пароль SSH
+            - Колонка E: Имя сервера (необязательно)
+            """
+        else: # existing_fp
+            instruction_text = """
+            Инструкция для существующих FastPanel:
+            - Колонка A: Имя домена (например, example.com)
+            - Колонка B: URL панели (https://ip_server:8888)
+            - Колонка C: Логин FastPanel (например, fastuser)
+            - Колонка D: Пароль FastPanel
+            - Колонка E: Имя сервера (необязательно)
+            """
         ctk.CTkLabel(upload_frame, text=instruction_text, justify="left").pack(pady=10)
 
-        # Блок 2: Предварительный просмотр и валидация
-        preview_frame = ctk.CTkFrame(self.tab_container)
+        # Блок 2: Предварительный просмотр
+        preview_frame = ctk.CTkFrame(parent)
         preview_frame.pack(fill="both", expand=True, pady=10)
-
         ctk.CTkLabel(preview_frame, text="Предварительный просмотр", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=10)
-        self.preview_summary_label = ctk.CTkLabel(preview_frame, text="")
-        self.preview_summary_label.pack(pady=5)
         
-        self.preview_table = ctk.CTkScrollableFrame(preview_frame)
-        self.preview_table.pack(fill="both", expand=True)
+        self.bulk_add_widgets[import_type]['summary_label'] = ctk.CTkLabel(preview_frame, text="")
+        self.bulk_add_widgets[import_type]['summary_label'].pack(pady=5)
+        
+        self.bulk_add_widgets[import_type]['preview_table'] = ctk.CTkScrollableFrame(preview_frame)
+        self.bulk_add_widgets[import_type]['preview_table'].pack(fill="both", expand=True)
 
         # Блок 3: Запуск импорта
-        import_frame = ctk.CTkFrame(self.tab_container)
+        import_frame = ctk.CTkFrame(parent)
         import_frame.pack(fill="x", pady=10)
-
-        self.import_button = ctk.CTkButton(import_frame, text="Начать импорт", state="disabled", command=self._start_import)
-        self.import_button.pack(pady=10)
         
-        self.progress_bar = ctk.CTkProgressBar(import_frame)
-        self.progress_bar.pack(fill="x", expand=True, padx=20)
-        self.progress_bar.set(0)
+        self.bulk_add_widgets[import_type]['import_button'] = ctk.CTkButton(import_frame, text="Начать импорт", state="disabled", command=lambda: self._start_import(import_type))
+        self.bulk_add_widgets[import_type]['import_button'].pack(pady=10)
+        
+        self.bulk_add_widgets[import_type]['progress_bar'] = ctk.CTkProgressBar(import_frame)
+        self.bulk_add_widgets[import_type]['progress_bar'].pack(fill="x", expand=True, padx=20)
+        self.bulk_add_widgets[import_type]['progress_bar'].set(0)
 
-    def _select_file(self):
+
+    def _select_file(self, import_type):
         file_path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx"), ("CSV files", "*.csv")])
         if file_path:
-            self._load_and_validate_file(file_path)
+            self._load_and_validate_file(file_path, import_type)
 
-    def _load_and_validate_file(self, file_path):
+    def _load_and_validate_file(self, file_path, import_type):
         try:
             if file_path.endswith('.csv'):
                 with open(file_path, 'r', encoding='utf-8') as f:
                     reader = csv.reader(f)
                     data = list(reader)
-            elif file_path.endswith('.xlsx'):
+            else: # .xlsx
                 workbook = openpyxl.load_workbook(file_path)
                 sheet = workbook.active
-                data = []
-                for row in sheet.iter_rows(values_only=True):
-                    data.append(row)
-            else:
-                self.show_error("Неподдерживаемый формат файла.")
-                return
+                data = [list(row) for row in sheet.iter_rows(values_only=True)]
+            
+            if self.bulk_add_widgets[import_type]['skip_header_var'].get():
+                data = data[1:]
 
-            self._validate_and_display_data(data)
+            self._validate_and_display_data(data, import_type)
 
         except Exception as e:
             self.show_error(f"Ошибка при чтении файла: {e}")
             self.log_action(f"Ошибка чтения файла: {e}", "ERROR")
 
-    def _validate_and_display_data(self, data):
-        for widget in self.preview_table.winfo_children():
+    def _validate_and_display_data(self, data, import_type):
+        widgets = self.bulk_add_widgets[import_type]
+        for widget in widgets['preview_table'].winfo_children():
             widget.destroy()
 
-        self.validated_data = []
+        widgets['validated_data'] = []
         errors = 0
         ready_to_import = 0
 
-        for i, row in enumerate(data[:20]):  # Показываем первые 20 строк
-            domain, ip, server_name = (row[0] if len(row) > 0 else "", 
-                                     row[1] if len(row) > 1 else "", 
-                                     row[2] if len(row) > 2 else "")
-            
-            status, message = self._validate_row(domain, ip)
+        for row in data:
+            row_data = [str(cell) if cell is not None else "" for cell in row]
+            status, message = self._validate_row(row_data, import_type)
 
-            row_frame = ctk.CTkFrame(self.preview_table)
-            row_frame.pack(fill="x", pady=2)
-            
-            status_icon = "✅" if status == "ok" else "⚠️" if status == "warning" else "❌"
-            ctk.CTkLabel(row_frame, text=f"{status_icon} {domain}, {ip}, {server_name} - {message}").pack(anchor="w")
-            
+            if len(widgets['preview_table'].winfo_children()) < 20: # Показываем первые 20 строк
+                 row_frame = ctk.CTkFrame(widgets['preview_table'])
+                 row_frame.pack(fill="x", pady=2)
+                 status_icon = "✅" if status == "ok" else "⚠️" if status == "warning" else "❌"
+                 display_text = ", ".join(row_data[:5])
+                 ctk.CTkLabel(row_frame, text=f"{status_icon} {display_text} - {message}").pack(anchor="w")
+
             if status != "error":
-                self.validated_data.append({'domain': domain, 'ip': ip, 'server_name': server_name})
+                widgets['validated_data'].append(row_data)
                 ready_to_import += 1
             else:
                 errors += 1
         
-        self.preview_summary_label.configure(text=f"Готово к импорту: {ready_to_import} строк. Ошибок: {errors} строк.")
-        if ready_to_import > 0:
-            self.import_button.configure(state="normal")
-        else:
-            self.import_button.configure(state="disabled")
+        widgets['summary_label'].configure(text=f"Готово к импорту: {ready_to_import} строк. Ошибок: {errors} строк.")
+        widgets['import_button'].configure(state="normal" if ready_to_import > 0 else "disabled")
 
-    def _validate_row(self, domain, ip):
-        if not domain or not ip:
-            return "error", "Отсутствуют обязательные данные"
-        try:
-            ipaddress.ip_address(ip)
-        except ValueError:
-            return "error", "Неверный формат IP-адреса"
-        
-        # Просто базовая проверка формата домена
+    def _validate_row(self, row, import_type):
+        if import_type == "new_server":
+            if len(row) < 4 or not all(row[:4]):
+                return "error", "Отсутствуют обязательные данные (Домен, IP, Логин, Пароль)"
+            domain, ip, login, password, server_name = (row + [""] * 5)[:5]
+            try:
+                ipaddress.ip_address(ip)
+            except ValueError:
+                return "error", "Неверный формат IP-адреса"
+
+        else: # existing_fp
+            if len(row) < 4 or not all(row[:4]):
+                return "error", "Отсутствуют обязательные данные (Домен, URL, Логин, Пароль)"
+            domain, url, login, password, server_name = (row + [""] * 5)[:5]
+            if not url.startswith(("http://", "https://")):
+                 return "error", "Неверный формат URL"
+
         if '.' not in domain or ' ' in domain:
             return "error", "Неверный формат домена"
 
         return "ok", "Готово к импорту"
-
-    def _start_import(self):
-        self.import_button.configure(state="disabled")
-        self.progress_bar.set(0)
         
-        import_thread = threading.Thread(target=self._run_import_in_thread, daemon=True)
+    def _start_import(self, import_type):
+        widgets = self.bulk_add_widgets[import_type]
+        widgets['import_button'].configure(state="disabled")
+        widgets['progress_bar'].set(0)
+        
+        import_thread = threading.Thread(target=self._run_import_in_thread, args=(import_type,), daemon=True)
         import_thread.start()
 
-    def _run_import_in_thread(self):
-        total = len(self.validated_data)
+    def _run_import_in_thread(self, import_type):
+        widgets = self.bulk_add_widgets[import_type]
+        data_to_import = widgets['validated_data']
+        total = len(data_to_import)
         added_domains = 0
         created_servers = 0
         errors = 0
 
-        for i, item in enumerate(self.validated_data):
+        for i, row in enumerate(data_to_import):
             try:
-                server_id = self._get_or_create_server(item['ip'], item['server_name'])
-                if server_id == "new":
+                server_id, is_new = self._get_or_create_server(row, import_type)
+                if is_new:
                     created_servers += 1
-                    # Получаем ID только что созданного сервера
-                    server = next((s for s in self.servers if s['ip'] == item['ip']), None)
-                    server_id = server['id']
-
-                self._add_or_update_domain(item['domain'], server_id)
+                
+                self._add_or_update_domain(row[0], server_id)
                 added_domains += 1
-
             except Exception as e:
                 errors += 1
-                self.log_action(f"Ошибка импорта строки: {item}. Ошибка: {e}", "ERROR")
+                self.log_action(f"Ошибка импорта строки: {row}. Ошибка: {e}", "ERROR")
 
-            self.after(0, self.progress_bar.set, (i + 1) / total)
+            self.after(0, widgets['progress_bar'].set, (i + 1) / total)
         
-        self.after(0, self._show_import_results, added_domains, created_servers, errors)
+        self.after(0, self._show_import_results, added_domains, created_servers, errors, import_type)
 
-    def _get_or_create_server(self, ip, name):
-        server = next((s for s in self.servers if s['ip'] == ip), None)
-        if server:
-            return server['id']
-        else:
-            server_name = name if name else f"Server-{ip}"
-            new_server = {
+    def _get_or_create_server(self, row, import_type):
+        if import_type == "new_server":
+            ip = row[1]
+            server = next((s for s in self.servers if s['ip'] == ip), None)
+            if server:
+                return server['id'], False
+            
+            new_server_data = {
                 "id": str(uuid.uuid4())[:8],
-                "name": server_name,
+                "name": row[4] or f"Server-{ip}",
                 "ip": ip,
-                "ssh_user": "root",
+                "ssh_user": row[2],
+                "password": row[3],
                 "created_at": datetime.now().isoformat(),
                 "fastpanel_installed": False
             }
-            if self.db.add_server(new_server):
-                self.servers.append(new_server)
-                return "new"
-            else:
-                raise Exception(f"Не удалось добавить сервер с IP {ip}")
+        else: # existing_fp
+            url = row[1]
+            try:
+                ip = url.split("://")[1].split(":")[0]
+            except:
+                raise ValueError("Неверный формат URL")
+            
+            server = next((s for s in self.servers if s['ip'] == ip), None)
+            if server:
+                return server['id'], False
+
+            new_server_data = {
+                "id": str(uuid.uuid4())[:8],
+                "name": row[4] or f"Server-{ip}",
+                "ip": ip,
+                "admin_url": url,
+                "admin_password": row[3],
+                "created_at": datetime.now().isoformat(),
+                "fastpanel_installed": True,
+                "ssh_user": "root" # Placeholder
+            }
+        
+        if self.db.add_server(new_server_data):
+            self.servers.append(new_server_data)
+            return new_server_data['id'], True
+        else:
+            raise Exception(f"Не удалось добавить сервер с IP {ip} в БД")
+
 
     def _add_or_update_domain(self, domain_name, server_id):
         domain_data = {"server_id": server_id}
@@ -1930,9 +1987,9 @@ class FastPanelApp(ctk.CTk):
             domain_data['domain_name'] = domain_name
             self.db.add_domain(domain_data)
 
-    def _show_import_results(self, added_domains, created_servers, errors):
+    def _show_import_results(self, added_domains, created_servers, errors, import_type):
         self.refresh_data()
-        self.import_button.configure(state="normal")
+        self.bulk_add_widgets[import_type]['import_button'].configure(state="normal")
 
         results_dialog = ctk.CTkToplevel(self)
         results_dialog.title("Результаты импорта")
