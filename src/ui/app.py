@@ -21,7 +21,9 @@ from src.services.cloudflare_service import CloudflareService
 from src.services.namecheap_service import NamecheapService
 from src.core.database_manager import DatabaseManager
 import time
-
+import csv
+import openpyxl
+from tkinter import filedialog
 
 # Настройка внешнего вида
 ctk.set_appearance_mode("dark")
@@ -291,6 +293,7 @@ class FastPanelApp(ctk.CTk):
         nav_buttons = [
             ("🖥️", "Серверы", self.show_servers_tab),
             ("🌐", "Домены", self.show_domain_tab),
+            ("📦", "Массовое добавление", self.show_bulk_add_tab),
             ("☁️", "Cloudflare", self.show_cloudflare_tab),
             ("🔧", "Настройки", self.show_settings_tab),
             ("📊", "Мониторинг", self.show_monitoring_tab),
@@ -648,17 +651,16 @@ class FastPanelApp(ctk.CTk):
             widget.destroy()
         
         # Обновленная конфигурация колонок с правильными весами и выравниванием
-        column_visibility = self.app_settings.get('column_visibility', {})
         self.all_columns = {
             "Домен": {"weight": 3, "min": 200, "visible": True, "anchor": "center"},
             "Сервер": {"weight": 2, "min": 180, "visible": True, "anchor": "center"},
             "Статус Cloudflare": {"weight": 2, "min": 160, "visible": True, "anchor": "center"},
-            "NS-серверы Cloudflare": {"weight": 3, "min": 250, "visible": column_visibility.get("NS-серверы Cloudflare", False), "anchor": "center"},
-            "FTP": {"weight": 1, "min": 80, "visible": column_visibility.get("FTP", False), "anchor": "center"},
-            "SSL": {"weight": 1, "min": 120, "visible": column_visibility.get("SSL", False), "anchor": "center"},
-            "Действия": {"weight": 1, "min": 100, "visible": True, "anchor": "center"}
+            "NS-серверы Cloudflare": {"weight": 3, "min": 250, "visible": self.app_settings.get('column_visibility', {}).get("NS-серверы Cloudflare", True), "anchor": "center"},
+            "FTP": {"weight": 1, "min": 80, "visible": True, "anchor": "center"},
+            "SSL": {"weight": 1, "min": 120, "visible": True, "anchor": "center"},
+            "Действия": {"weight": 1, "min": 100, "visible": True, "anchor": "center"}  # Новая колонка для кнопок
         }
-
+        
         # Чекбокс колонка
         self.domain_header.grid_columnconfigure(0, weight=0, minsize=40)
         
@@ -677,9 +679,9 @@ class FastPanelApp(ctk.CTk):
         dialog.transient(self)
         dialog.grab_set()
         ctk.CTkLabel(dialog, text="Выберите видимые колонки", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=15)
-        togglable_columns = ["NS-серверы Cloudflare", "FTP", "SSL"]
+        togglable_columns = ["NS-серверы Cloudflare"]
         for col_name in togglable_columns:
-            var = ctk.BooleanVar(value=self.app_settings.get('column_visibility', {}).get(col_name, False))
+            var = ctk.BooleanVar(value=self.app_settings.get('column_visibility', {}).get(col_name, True))
             cb = ctk.CTkCheckBox(dialog, text=col_name, variable=var, command=lambda name=col_name, v=var: self.toggle_column_visibility(name, v))
             cb.pack(pady=5, padx=20, anchor="w")
         ctk.CTkButton(dialog, text="Закрыть", command=dialog.destroy).pack(pady=20)
@@ -715,56 +717,53 @@ class FastPanelApp(ctk.CTk):
         current_col = 1
         
         # Домен (центрированный)
-        if self.all_columns["Домен"]["visible"]:
-            domain_label = ctk.CTkLabel(domain_frame, text=domain, font=ctk.CTkFont(size=13), anchor="center")
-            domain_label.grid(row=0, column=current_col, padx=5, pady=8, sticky="ew")
-            current_col += 1
+        domain_label = ctk.CTkLabel(domain_frame, text=domain, font=ctk.CTkFont(size=13), anchor="center")
+        domain_label.grid(row=0, column=current_col, padx=5, pady=8, sticky="ew")
+        current_col += 1
         
         # Сервер
-        if self.all_columns["Сервер"]["visible"]:
-            server_ips = ["(Не выбран)"] + [s['ip'] for s in self.servers if s.get('ip')]
-            server_ip_value = "(Не выбран)"
-            if domain_info.get("server_id"):
-                server = next((s for s in self.servers if s['id'] == domain_info.get("server_id")), None)
-                if server: 
-                    server_ip_value = server['ip']
-            
-            server_var = ctk.StringVar(value=server_ip_value)
-            server_menu = ctk.CTkOptionMenu(
-                domain_frame, 
-                values=server_ips, 
-                variable=server_var, 
-                width=150,
-                anchor="center",
-                command=lambda ip, d=domain: self.update_domain_server(d, ip)
-            )
-            server_menu.grid(row=0, column=current_col, padx=5, pady=8, sticky="ew")
-            current_col += 1
+        server_ips = ["(Не выбран)"] + [s['ip'] for s in self.servers if s.get('ip')]
+        server_ip_value = "(Не выбран)"
+        if domain_info.get("server_id"):
+            server = next((s for s in self.servers if s['id'] == domain_info.get("server_id")), None)
+            if server: 
+                server_ip_value = server['ip']
+        
+        server_var = ctk.StringVar(value=server_ip_value)
+        server_menu = ctk.CTkOptionMenu(
+            domain_frame, 
+            values=server_ips, 
+            variable=server_var, 
+            width=150,
+            anchor="center",
+            command=lambda ip, d=domain: self.update_domain_server(d, ip)
+        )
+        server_menu.grid(row=0, column=current_col, padx=5, pady=8, sticky="ew")
+        current_col += 1
         
         # Статус Cloudflare
-        if self.all_columns["Статус Cloudflare"]["visible"]:
-            status_colors = {
-                "none": ("#666666", "#aaaaaa"),
-                "pending": ("#ff9800", "#f57c00"),
-                "active": ("#4caf50", "#2e7d32"),
-                "error": ("#f44336", "#d32f2f")
-            }
-            status_text = {
-                "none": "⚪ Не привязан",
-                "pending": "🟡 В процессе...",
-                "active": "🟢 Активен",
-                "error": "🔴 Ошибка"
-            }
-            status = domain_info.get("cloudflare_status", "none")
-            status_label = ctk.CTkLabel(
-                domain_frame,
-                text=status_text.get(status),
-                text_color=status_colors.get(status),
-                anchor="center",
-                font=ctk.CTkFont(size=12)
-            )
-            status_label.grid(row=0, column=current_col, padx=5, pady=8, sticky="ew")
-            current_col += 1
+        status_colors = {
+            "none": ("#666666", "#aaaaaa"),
+            "pending": ("#ff9800", "#f57c00"),
+            "active": ("#4caf50", "#2e7d32"),
+            "error": ("#f44336", "#d32f2f")
+        }
+        status_text = {
+            "none": "⚪ Не привязан",
+            "pending": "🟡 В процессе...",
+            "active": "🟢 Активен",
+            "error": "🔴 Ошибка"
+        }
+        status = domain_info.get("cloudflare_status", "none")
+        status_label = ctk.CTkLabel(
+            domain_frame,
+            text=status_text.get(status),
+            text_color=status_colors.get(status),
+            anchor="center",
+            font=ctk.CTkFont(size=12)
+        )
+        status_label.grid(row=0, column=current_col, padx=5, pady=8, sticky="ew")
+        current_col += 1
         
         # NS-серверы Cloudflare (если видимы)
         if self.all_columns["NS-серверы Cloudflare"]["visible"]:
@@ -781,80 +780,75 @@ class FastPanelApp(ctk.CTk):
             current_col += 1
         
         # FTP кнопка
-        if self.all_columns["FTP"]["visible"]:
-            ftp_button = ctk.CTkButton(
-                domain_frame,
-                text="🖥️ FTP",
-                width=70,
-                height=28,
-                font=ctk.CTkFont(size=11),
-                command=lambda d=domain_info: self.show_ftp_credentials_dialog(d)
-            )
-            ftp_button.grid(row=0, column=current_col, padx=5, pady=8)
-            if not domain_info.get("ftp_user"):
-                ftp_button.configure(state="disabled")
-            current_col += 1
+        ftp_button = ctk.CTkButton(
+            domain_frame,
+            text="🖥️ FTP",
+            width=70,
+            height=28,
+            font=ctk.CTkFont(size=11),
+            command=lambda d=domain_info: self.show_ftp_credentials_dialog(d)
+        )
+        ftp_button.grid(row=0, column=current_col, padx=5, pady=8)
+        if not domain_info.get("ftp_user"):
+            ftp_button.configure(state="disabled")
+        current_col += 1
         
         # SSL кнопка
-        if self.all_columns["SSL"]["visible"]:
-            ssl_status = domain_info.get("ssl_status", "none")
-            ssl_button = ctk.CTkButton(domain_frame, height=28, font=ctk.CTkFont(size=11))
-            
-            if ssl_status == "active":
-                ssl_button.configure(text="✅ Активен", fg_color="green", width=100, command=lambda d=domain_info: self.start_ssl_issuance(d))
-            elif ssl_status == "pending":
-                ssl_button.configure(text="⏳ Выпускается", state="disabled", width=100)
-            elif ssl_status == "error":
-                ssl_button.configure(text="❌ Ошибка", fg_color="red", width=100, command=lambda d=domain_info: self.start_ssl_issuance(d))
-            else:
-                ssl_button.configure(text="Выпустить", width=100, command=lambda d=domain_info: self.start_ssl_issuance(d))
-            
-            ssl_button.grid(row=0, column=current_col, padx=5, pady=8)
-            if not domain_info.get("server_id"):
-                ssl_button.configure(state="disabled")
-            current_col += 1
+        ssl_status = domain_info.get("ssl_status", "none")
+        ssl_button = ctk.CTkButton(domain_frame, height=28, font=ctk.CTkFont(size=11))
+        
+        if ssl_status == "active":
+            ssl_button.configure(text="✅ Активен", fg_color="green", width=100, command=lambda d=domain_info: self.start_ssl_issuance(d))
+        elif ssl_status == "pending":
+            ssl_button.configure(text="⏳ Выпускается", state="disabled", width=100)
+        elif ssl_status == "error":
+            ssl_button.configure(text="❌ Ошибка", fg_color="red", width=100, command=lambda d=domain_info: self.start_ssl_issuance(d))
+        else:
+            ssl_button.configure(text="Выпустить", width=100, command=lambda d=domain_info: self.start_ssl_issuance(d))
+        
+        ssl_button.grid(row=0, column=current_col, padx=5, pady=8)
+        if not domain_info.get("server_id"):
+            ssl_button.configure(state="disabled")
+        current_col += 1
         
         # Действия (редактирование и удаление в одной колонке)
-        if self.all_columns["Действия"]["visible"]:
-            actions_frame = ctk.CTkFrame(domain_frame, fg_color="transparent")
-            actions_frame.grid(row=0, column=current_col, padx=5, pady=8, sticky="ew")
-            
-            # Центрируем кнопки в колонке действий
-            actions_frame.grid_columnconfigure(0, weight=1)
-            actions_frame.grid_columnconfigure(1, weight=0)
-            actions_frame.grid_columnconfigure(2, weight=0)
-            actions_frame.grid_columnconfigure(3, weight=1)
-            
-            edit_button = ctk.CTkButton(
-                actions_frame,
-                text="✏️",
-                width=30,
-                height=28,
-                font=ctk.CTkFont(size=12),
-                command=lambda d=domain_info: self.show_edit_domain_dialog(d)
-            )
-            edit_button.grid(row=0, column=1, padx=2)
-            
-            delete_button = ctk.CTkButton(
-                actions_frame,
-                text="🗑️",
-                width=30,
-                height=28,
-                font=ctk.CTkFont(size=12),
-                fg_color=("#f44336", "#d32f2f"),
-                hover_color=("#da190b", "#b71c1c"),
-                command=lambda d=domain_info: self.delete_domain(d)
-            )
-            delete_button.grid(row=0, column=2, padx=2)
+        actions_frame = ctk.CTkFrame(domain_frame, fg_color="transparent")
+        actions_frame.grid(row=0, column=current_col, padx=5, pady=8, sticky="ew")
+        
+        # Центрируем кнопки в колонке действий
+        actions_frame.grid_columnconfigure(0, weight=1)
+        actions_frame.grid_columnconfigure(1, weight=0)
+        actions_frame.grid_columnconfigure(2, weight=0)
+        actions_frame.grid_columnconfigure(3, weight=1)
+        
+        edit_button = ctk.CTkButton(
+            actions_frame,
+            text="✏️",
+            width=30,
+            height=28,
+            font=ctk.CTkFont(size=12),
+            command=lambda d=domain_info: self.show_edit_domain_dialog(d)
+        )
+        edit_button.grid(row=0, column=1, padx=2)
+        
+        delete_button = ctk.CTkButton(
+            actions_frame,
+            text="🗑️",
+            width=30,
+            height=28,
+            font=ctk.CTkFont(size=12),
+            fg_color=("#f44336", "#d32f2f"),
+            hover_color=("#da190b", "#b71c1c"),
+            command=lambda d=domain_info: self.delete_domain(d)
+        )
+        delete_button.grid(row=0, column=2, padx=2)
         
         # Сохраняем ссылки на виджеты для обновления
         self.domain_widgets[domain] = {
-            "frame": domain_frame
+            "frame": domain_frame,
+            "status_label": status_label,
+            "ssl_button": ssl_button
         }
-        if self.all_columns["Статус Cloudflare"]["visible"]:
-            self.domain_widgets[domain]["status_label"] = status_label
-        if self.all_columns["SSL"]["visible"]:
-            self.domain_widgets[domain]["ssl_button"] = ssl_button
         if self.all_columns["NS-серверы Cloudflare"]["visible"]:
             self.domain_widgets[domain]["ns_label"] = ns_label
             
@@ -1132,7 +1126,7 @@ class FastPanelApp(ctk.CTk):
             self.db.update_domain(domain_name, {"ssl_status": status})
             for d in self.domains:
                 if d["domain_name"] == domain_name: d["ssl_status"] = status; break
-            if domain_name in self.domain_widgets and "ssl_button" in self.domain_widgets[domain_name]:
+            if domain_name in self.domain_widgets:
                 widgets = self.domain_widgets[domain_name]
                 ssl_button = widgets["ssl_button"]
                 
@@ -1162,10 +1156,9 @@ class FastPanelApp(ctk.CTk):
                     break
             if domain in self.domain_widgets:
                 widget_refs = self.domain_widgets[domain]
-                if "status_label" in widget_refs:
-                    status_colors = { "none": ("#666666", "#aaaaaa"), "pending": ("#ff9800", "#f57c00"), "active": ("#4caf50", "#2e7d32"), "error": ("#f44336", "#d32f2f") }
-                    status_text = { "none": "⚪ Не привязан", "pending": "🟡 В процессе...", "active": "🟢 Активен", "error": "🔴 Ошибка" }
-                    widget_refs["status_label"].configure(text=status_text.get(status), text_color=status_colors.get(status))
+                status_colors = { "none": ("#666666", "#aaaaaa"), "pending": ("#ff9800", "#f57c00"), "active": ("#4caf50", "#2e7d32"), "error": ("#f44336", "#d32f2f") }
+                status_text = { "none": "⚪ Не привязан", "pending": "🟡 В процессе...", "active": "🟢 Активен", "error": "🔴 Ошибка" }
+                widget_refs["status_label"].configure(text=status_text.get(status), text_color=status_colors.get(status))
                 if ns_servers and "ns_label" in widget_refs: widget_refs["ns_label"].configure(text=", ".join(ns_servers))
                 widget_refs["frame"].update_idletasks()
         self.after(0, _update)
@@ -1756,6 +1749,203 @@ class FastPanelApp(ctk.CTk):
         for i, d in enumerate(self.domains):
             if d.get('domain_name') == domain_name: self.domains[i].update(updated_domain_info); break
         if self.current_tab == "domain": self.show_domain_tab()
+    
+    def show_bulk_add_tab(self):
+        self.clear_tab_container()
+        self.page_title.configure(text="Массовое добавление")
+        self.current_tab = "bulk_add"
+
+        # Блок 1: Загрузка файла и инструкции
+        upload_frame = ctk.CTkFrame(self.tab_container)
+        upload_frame.pack(fill="x", pady=10)
+
+        ctk.CTkLabel(upload_frame, text="Загрузка файла с данными", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=10)
+        ctk.CTkButton(upload_frame, text="Выбрать файл (.csv, .xlsx)", command=self._select_file).pack(pady=10)
+
+        instruction_text = """
+        Инструкция по формату файла:
+        Подготовьте файл в формате CSV или XLSX. Данные должны быть организованы по колонкам:
+        - Колонка A (Обязательная): Имена доменов (например, example.com).
+        - Колонка B (Обязательная): IP-адреса серверов (например, 192.168.1.1).
+        - Колонка C (Необязательная): Пользовательские имена для серверов.
+        """
+        ctk.CTkLabel(upload_frame, text=instruction_text, justify="left").pack(pady=10)
+
+        # Блок 2: Предварительный просмотр и валидация
+        preview_frame = ctk.CTkFrame(self.tab_container)
+        preview_frame.pack(fill="both", expand=True, pady=10)
+
+        ctk.CTkLabel(preview_frame, text="Предварительный просмотр", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=10)
+        self.preview_summary_label = ctk.CTkLabel(preview_frame, text="")
+        self.preview_summary_label.pack(pady=5)
+        
+        self.preview_table = ctk.CTkScrollableFrame(preview_frame)
+        self.preview_table.pack(fill="both", expand=True)
+
+        # Блок 3: Запуск импорта
+        import_frame = ctk.CTkFrame(self.tab_container)
+        import_frame.pack(fill="x", pady=10)
+
+        self.import_button = ctk.CTkButton(import_frame, text="Начать импорт", state="disabled", command=self._start_import)
+        self.import_button.pack(pady=10)
+        
+        self.progress_bar = ctk.CTkProgressBar(import_frame)
+        self.progress_bar.pack(fill="x", expand=True, padx=20)
+        self.progress_bar.set(0)
+
+    def _select_file(self):
+        file_path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx"), ("CSV files", "*.csv")])
+        if file_path:
+            self._load_and_validate_file(file_path)
+
+    def _load_and_validate_file(self, file_path):
+        try:
+            if file_path.endswith('.csv'):
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    reader = csv.reader(f)
+                    data = list(reader)
+            elif file_path.endswith('.xlsx'):
+                workbook = openpyxl.load_workbook(file_path)
+                sheet = workbook.active
+                data = []
+                for row in sheet.iter_rows(values_only=True):
+                    data.append(row)
+            else:
+                self.show_error("Неподдерживаемый формат файла.")
+                return
+
+            self._validate_and_display_data(data)
+
+        except Exception as e:
+            self.show_error(f"Ошибка при чтении файла: {e}")
+            self.log_action(f"Ошибка чтения файла: {e}", "ERROR")
+
+    def _validate_and_display_data(self, data):
+        for widget in self.preview_table.winfo_children():
+            widget.destroy()
+
+        self.validated_data = []
+        errors = 0
+        ready_to_import = 0
+
+        for i, row in enumerate(data[:20]):  # Показываем первые 20 строк
+            domain, ip, server_name = (row[0] if len(row) > 0 else "", 
+                                     row[1] if len(row) > 1 else "", 
+                                     row[2] if len(row) > 2 else "")
+            
+            status, message = self._validate_row(domain, ip)
+
+            row_frame = ctk.CTkFrame(self.preview_table)
+            row_frame.pack(fill="x", pady=2)
+            
+            status_icon = "✅" if status == "ok" else "⚠️" if status == "warning" else "❌"
+            ctk.CTkLabel(row_frame, text=f"{status_icon} {domain}, {ip}, {server_name} - {message}").pack(anchor="w")
+            
+            if status != "error":
+                self.validated_data.append({'domain': domain, 'ip': ip, 'server_name': server_name})
+                ready_to_import += 1
+            else:
+                errors += 1
+        
+        self.preview_summary_label.configure(text=f"Готово к импорту: {ready_to_import} строк. Ошибок: {errors} строк.")
+        if ready_to_import > 0:
+            self.import_button.configure(state="normal")
+        else:
+            self.import_button.configure(state="disabled")
+
+    def _validate_row(self, domain, ip):
+        if not domain or not ip:
+            return "error", "Отсутствуют обязательные данные"
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            return "error", "Неверный формат IP-адреса"
+        
+        # Просто базовая проверка формата домена
+        if '.' not in domain or ' ' in domain:
+            return "error", "Неверный формат домена"
+
+        return "ok", "Готово к импорту"
+
+    def _start_import(self):
+        self.import_button.configure(state="disabled")
+        self.progress_bar.set(0)
+        
+        import_thread = threading.Thread(target=self._run_import_in_thread, daemon=True)
+        import_thread.start()
+
+    def _run_import_in_thread(self):
+        total = len(self.validated_data)
+        added_domains = 0
+        created_servers = 0
+        errors = 0
+
+        for i, item in enumerate(self.validated_data):
+            try:
+                server_id = self._get_or_create_server(item['ip'], item['server_name'])
+                if server_id == "new":
+                    created_servers += 1
+                    # Получаем ID только что созданного сервера
+                    server = next((s for s in self.servers if s['ip'] == item['ip']), None)
+                    server_id = server['id']
+
+                self._add_or_update_domain(item['domain'], server_id)
+                added_domains += 1
+
+            except Exception as e:
+                errors += 1
+                self.log_action(f"Ошибка импорта строки: {item}. Ошибка: {e}", "ERROR")
+
+            self.after(0, self.progress_bar.set, (i + 1) / total)
+        
+        self.after(0, self._show_import_results, added_domains, created_servers, errors)
+
+    def _get_or_create_server(self, ip, name):
+        server = next((s for s in self.servers if s['ip'] == ip), None)
+        if server:
+            return server['id']
+        else:
+            server_name = name if name else f"Server-{ip}"
+            new_server = {
+                "id": str(uuid.uuid4())[:8],
+                "name": server_name,
+                "ip": ip,
+                "ssh_user": "root",
+                "created_at": datetime.now().isoformat(),
+                "fastpanel_installed": False
+            }
+            if self.db.add_server(new_server):
+                self.servers.append(new_server)
+                return "new"
+            else:
+                raise Exception(f"Не удалось добавить сервер с IP {ip}")
+
+    def _add_or_update_domain(self, domain_name, server_id):
+        domain_data = {"server_id": server_id}
+        existing_domain = next((d for d in self.domains if d['domain_name'] == domain_name), None)
+
+        if existing_domain:
+            self.db.update_domain(domain_name, domain_data)
+        else:
+            domain_data['domain_name'] = domain_name
+            self.db.add_domain(domain_data)
+
+    def _show_import_results(self, added_domains, created_servers, errors):
+        self.refresh_data()
+        self.import_button.configure(state="normal")
+
+        results_dialog = ctk.CTkToplevel(self)
+        results_dialog.title("Результаты импорта")
+        results_dialog.geometry("400x250")
+        results_dialog.transient(self)
+        results_dialog.grab_set()
+
+        ctk.CTkLabel(results_dialog, text="Импорт завершен", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=20)
+        ctk.CTkLabel(results_dialog, text=f"Успешно добавлено/обновлено доменов: {added_domains}").pack(pady=5)
+        ctk.CTkLabel(results_dialog, text=f"Создано новых серверов: {created_servers}").pack(pady=5)
+        ctk.CTkLabel(results_dialog, text=f"Обнаружено ошибок: {errors}").pack(pady=5)
+        ctk.CTkButton(results_dialog, text="Закрыть", command=results_dialog.destroy).pack(pady=20)
+
 
 if __name__ == "__main__":
     app = FastPanelApp()
